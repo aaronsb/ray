@@ -45,7 +45,7 @@ A real-time path tracer using Vulkan compute shaders and Qt for the frontend.
 Requires:
 - Vulkan SDK
 - Qt 6
-- CMake 3.16+
+- CMake 3.20+
 - glslc (for shader compilation)
 
 ```bash
@@ -54,6 +54,87 @@ cmake ..
 cmake --build .
 ./raydemo
 ```
+
+## Project Structure
+
+```
+src/
+  core/                      # libraycore - shared rendering library
+    types.h                  # Vec3 and math utilities
+    camera.h                 # OrbitCamera with mouse controls
+    materials.h              # Material types (diffuse, metal, glass, etc.)
+    geometry.h               # Geometry primitives (Sphere, Box)
+    lights.h                 # SpotLight with gobo patterns
+    scene.h                  # Scene container with JSON serialization
+    renderer.h/.cpp          # Vulkan renderer and window
+
+  demos/
+    raydemo/                 # Demo executable
+      main.cpp               # Application entry point
+      test_scene.h/.cpp      # Scene factory function
+
+shaders/
+  raytrace.comp              # Main path tracing shader
+  includes/
+    noise.glsl               # Procedural noise (Perlin, FBM, Worley)
+    random.glsl              # PCG random number generation
+    geometry.glsl            # Ray intersection tests
+    materials.glsl           # Material scattering functions
+    lights.glsl              # Spotlight evaluation
+
+docs/
+  adr/                       # Architecture Decision Records
+```
+
+## Creating a New Demo
+
+1. Create a new directory under `src/demos/`:
+   ```
+   src/demos/mydemo/
+     main.cpp
+     my_scene.h
+     my_scene.cpp
+   ```
+
+2. Create your scene factory:
+   ```cpp
+   // my_scene.h
+   #pragma once
+   #include "scene.h"
+   Scene createMyScene();
+
+   // my_scene.cpp
+   #include "my_scene.h"
+   Scene createMyScene() {
+       Scene scene;
+       // Add materials, geometry, lights...
+       scene.addMaterial(MaterialType::Diffuse, {0.8f, 0.2f, 0.2f});
+       scene.addSphere({0, 1, 0}, 1.0f, 0);
+       return scene;
+   }
+   ```
+
+3. Create main.cpp (copy from raydemo and change the include):
+   ```cpp
+   #include "renderer.h"
+   #include "my_scene.h"
+   // ... same as raydemo/main.cpp but with:
+   window.setScene(createMyScene());
+   ```
+
+4. Add to CMakeLists.txt:
+   ```cmake
+   add_demo(mydemo ${CMAKE_SOURCE_DIR}/src/demos/mydemo
+       src/demos/mydemo/main.cpp
+       src/demos/mydemo/my_scene.cpp
+   )
+   ```
+
+5. Build and run:
+   ```bash
+   cmake --build build
+   ./build/mydemo
+   ```
 
 ## Technical Notes
 
