@@ -8,7 +8,7 @@ This directory contains Architecture Decision Records (ADRs) documenting signifi
 |-----|-------|--------|---------|
 | [ADR-001](ADR-001-vulkan-rt-architecture.md) | Vulkan RT Architecture | Accepted | Use Vulkan + ray_query + QVulkanWindow for hardware-accelerated path tracing |
 | [ADR-002](ADR-002-path-tracer-optimizations.md) | Path Tracer Optimizations | Active | Discovery log tracking optimizations (NEE, MIS, adaptive sampling, etc.) |
-| [ADR-003](ADR-003-modular-architecture.md) | Modular Architecture | Proposed | Refactor monolith into separate modules (geometry, materials, lights, scene, etc.) |
+| [ADR-003](ADR-003-modular-architecture.md) | Modular Architecture | Accepted | Refactor monolith into separate modules (geometry, materials, lights, scene, etc.) |
 | [ADR-004](ADR-004-geometry-primitives.md) | Geometry Primitives | Proposed | Define primitive types: analytic (sphere, box, cylinder), voxel chunks, triangle meshes |
 
 ## Status Legend

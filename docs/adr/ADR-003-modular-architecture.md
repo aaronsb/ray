@@ -1,6 +1,6 @@
 # ADR-003: Modular Architecture Refactoring
 
-Status: Proposed
+Status: Accepted
 Date: 2025-12-21
 Deciders: @aaron, @claude
 
