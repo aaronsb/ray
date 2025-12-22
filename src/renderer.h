@@ -93,6 +93,7 @@ private:
     qint64 m_lastFrameNs = 0;
     qint64 m_lastMotionNs = 0;  // When camera last moved
     bool m_wasStationary = false;  // Track state change
+    float m_smoothedSamples = 32.0f;  // Adaptive sample count (smoothed)
 
     // Sun position (radians)
     float m_sunElevation = 0.785f;  // ~45 degrees

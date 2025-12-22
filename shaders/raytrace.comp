@@ -1010,20 +1010,29 @@ void main() {
 
     initRNG(uvec2(pixel), pc.frameIndex);
 
-    // Jittered sample within pixel
-    // Flip Y for Vulkan coordinate system (Y=0 at top)
-    vec2 uv = (vec2(pixel) + rand2()) / vec2(pc.width, pc.height);
-    uv.y = 1.0 - uv.y;
+    // Use full sample budget always - accumulation handles convergence,
+    // and reducing samples causes specular features (sun reflections, caustics) to fade
+    uint samples = pc.sampleCount;
 
-    Ray ray = getCameraRay(uv);
-    vec3 color = tracePath(ray);
+    vec3 color = vec3(0.0);
+    for (uint s = 0; s < samples; s++) {
+        // Jittered sample within pixel
+        // Flip Y for Vulkan coordinate system (Y=0 at top)
+        vec2 uv = (vec2(pixel) + rand2()) / vec2(pc.width, pc.height);
+        uv.y = 1.0 - uv.y;
 
-    // Clamp to prevent fireflies and handle NaN/inf from extreme values
-    // NaN check: NaN != NaN, so replace with black
-    if (any(isnan(color)) || any(isinf(color))) {
-        color = vec3(0.0);
+        Ray ray = getCameraRay(uv);
+        vec3 sampleColor = tracePath(ray);
+
+        // Clamp per sample to prevent fireflies
+        if (any(isnan(sampleColor)) || any(isinf(sampleColor))) {
+            sampleColor = vec3(0.0);
+        }
+        sampleColor = clamp(sampleColor, vec3(0.0), vec3(20.0));
+
+        color += sampleColor;
     }
-    color = clamp(color, vec3(0.0), vec3(100.0));
+    color /= float(samples);
 
     // Hybrid accumulation:
     // - Moving (accumulate=0): Just current frame (no blur from old camera positions)
@@ -1034,12 +1043,11 @@ void main() {
     if (pc.accumulate == 0) {
         // Moving: blend with just the previous frame (2-frame average)
         blended = mix(prev.rgb, color, 0.5);
-    } else if (pc.frameIndex == 0) {
-        // First frame after becoming stationary
-        blended = color;
     } else {
-        // Proper accumulation when stationary
-        float weight = 1.0 / float(pc.frameIndex + 1);
+        // Progressive accumulation, but cap frame count so new samples
+        // always contribute at least ~3% (prevents locking in early errors)
+        uint cappedFrame = min(pc.frameIndex, 32u);
+        float weight = 1.0 / float(cappedFrame + 1);
         blended = mix(prev.rgb, color, weight);
     }
     imageStore(accumImage, pixel, vec4(blended, 1.0));

@@ -133,10 +133,10 @@ void RayTracingRenderer::startNextFrame() {
     constexpr qint64 stationaryThresholdNs = 200 * 1000000LL;  // 200ms
     bool isStationary = (now - m_lastMotionNs) > stationaryThresholdNs;
 
-    // Reset frame counter when transitioning to stationary
-    // This starts proper accumulation fresh on top of rolling average base
+    // Reset to 1 (not 0) when becoming stationary - blends 50/50 with rolling average
+    // instead of discarding it completely (which causes a flash)
     if (isStationary && !m_wasStationary) {
-        m_frameIndex = 0;
+        m_frameIndex = 1;
     }
     m_wasStationary = isStationary;
 
@@ -466,10 +466,20 @@ void RayTracingRenderer::recordComputeCommands(VkCommandBuffer cmdBuf, bool isSt
     m_devFuncs->vkCmdBindDescriptorSets(cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE,
         m_pipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
 
+    // Adaptive sample count: target 60fps, scale samples to use available headroom
+    constexpr float targetFrameMs = 16.67f;  // 60fps
+    if (m_lastFrameTimeMs > 0.1f) {
+        float scale = targetFrameMs / m_lastFrameTimeMs;
+        float idealSamples = 32.0f * scale;
+        // Smooth to avoid jitter, clamp to [2, 64]
+        m_smoothedSamples = m_smoothedSamples * 0.8f + idealSamples * 0.2f;
+        m_smoothedSamples = std::clamp(m_smoothedSamples, 2.0f, 64.0f);
+    }
+
     // Push constants
     PushConstants pc{};
     pc.frameIndex = m_frameIndex;
-    pc.sampleCount = 1;
+    pc.sampleCount = static_cast<uint32_t>(m_smoothedSamples);
     pc.maxBounces = 5;
     pc.sphereCount = static_cast<uint32_t>(m_spheres.size());
     pc.boxCount = static_cast<uint32_t>(m_boxes.size());
