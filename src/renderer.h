@@ -18,7 +18,10 @@ public:
 
     OrbitCamera& camera() { return m_camera; }
     void resetAccumulation() { m_frameIndex = 0; }
-    void markCameraMotion() { m_lastMotionNs = m_frameTimer.nsecsElapsed(); }
+    void markCameraMotion() {
+        m_lastMotionNs = m_frameTimer.nsecsElapsed();
+        m_window->requestUpdate();  // Wake up render loop if converged
+    }
 
     // Sun control - full 360 degree sweep for both axes
     void adjustSunAzimuth(float delta) {
