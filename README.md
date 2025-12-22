@@ -21,8 +21,14 @@ A real-time path tracer using Vulkan compute shaders and Qt for the frontend.
   - Day/night cycle with twilight transitions
   - Procedural stars at night
 - **Geometry**: Spheres and axis-aligned boxes
+- **Spotlights with gobo patterns**:
+  - Configurable cone angles with smooth falloff
+  - 6 gobo patterns: solid, stripes, grid, circles, dots, star
+  - Pattern rotation and scale controls
 - **Next Event Estimation (NEE)** for efficient direct lighting
 - **Interactive camera**: Orbit, pan, zoom with mouse
+- **Adaptive sampling**: Targets 60fps, scales sample count to use available GPU headroom
+- **Auto-convergence**: Stops rendering after ~200 frames to let GPU rest
 
 ## Controls
 
@@ -31,6 +37,7 @@ A real-time path tracer using Vulkan compute shaders and Qt for the frontend.
 - **Scroll wheel**: Zoom
 - **`[` / `]`**: Adjust sun azimuth
 - **`{` / `}`**: Adjust sun elevation (full day/night cycle)
+- **`,` / `.`**: Cycle spotlight gobo patterns (includes "off")
 - **`S`**: Save screenshot
 
 ## Building
@@ -53,4 +60,6 @@ cmake --build .
 - Compute shader based (no hardware RT required)
 - 7-wavelength spectral sampling for dichroic materials
 - Hybrid accumulation: temporal averaging when moving, proper accumulation when stationary
+- Framerate-adaptive multi-sampling: more samples when GPU has headroom
 - Precision-optimized ground plane intersection to avoid floating-point artifacts
+- Auto-idle after convergence to reduce GPU power consumption
