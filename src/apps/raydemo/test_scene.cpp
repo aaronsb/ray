@@ -80,6 +80,26 @@ Scene createTestScene() {
     // Soap bubble sphere
     scene.addSphere({0.0f, 0.6f, 4.0f}, 0.6f, 16);
 
+    // === CYLINDERS ===
+    // Metal pillar
+    scene.addCylinder({-7.0f, 0.0f, -1.0f}, {0.0f, 1.0f, 0.0f}, 0.3f, 3.0f, 4, true);
+    // Glass tube
+    scene.addCylinder({7.0f, 0.0f, 2.5f}, {0.0f, 1.0f, 0.0f}, 0.4f, 2.0f, 5, true);
+    // Frosted horizontal rod
+    scene.addCylinder({-3.0f, 2.0f, -6.0f}, {1.0f, 0.0f, 0.0f}, 0.15f, 6.0f, 7, true);
+    // Wood log
+    scene.addCylinder({4.0f, 0.2f, 4.5f}, {0.707f, 0.0f, 0.707f}, 0.2f, 1.5f, 11, true);
+
+    // === CONES ===
+    // Metal spike
+    scene.addCone({-7.0f, 3.0f, -1.0f}, {0.0f, 1.0f, 0.0f}, 0.4f, 1.0f, 4, true);
+    // Glass cone
+    scene.addCone({7.0f, 2.0f, 2.5f}, {0.0f, 1.0f, 0.0f}, 0.5f, 1.5f, 5, true);
+    // Marble pyramid on pedestal
+    scene.addCone({-5.5f, 0.6f, -3.0f}, {0.0f, 1.0f, 0.0f}, 0.5f, 1.0f, 10, true);
+    // Dichroic cone
+    scene.addCone({0.0f, 0.0f, -6.5f}, {0.0f, 1.0f, 0.0f}, 0.8f, 2.0f, 9, true);
+
     // ROYGBIV rainbow
     const float roygbivRadius = 0.5f;
     const float roygbivSpacing = 1.2f;

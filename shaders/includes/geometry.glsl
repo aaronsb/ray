@@ -101,6 +101,166 @@ bool hitBox(Box box, Ray r, float tMin, float tMax, inout HitRecord rec) {
     return true;
 }
 
+// Cylinder intersection
+// Cylinder defined by base center, axis direction, radius, height
+bool hitCylinder(Cylinder cyl, Ray r, float tMin, float tMax, inout HitRecord rec) {
+    // Vector from ray origin to cylinder base
+    vec3 oc = r.origin - cyl.base;
+
+    // Project ray direction and oc onto plane perpendicular to axis
+    float dDotA = dot(r.direction, cyl.axis);
+    float ocDotA = dot(oc, cyl.axis);
+
+    vec3 dPerp = r.direction - dDotA * cyl.axis;
+    vec3 ocPerp = oc - ocDotA * cyl.axis;
+
+    // Quadratic coefficients for infinite cylinder
+    float a = dot(dPerp, dPerp);
+    float b = 2.0 * dot(dPerp, ocPerp);
+    float c = dot(ocPerp, ocPerp) - cyl.radius * cyl.radius;
+
+    float discriminant = b * b - 4.0 * a * c;
+
+    float bestT = tMax + 1.0;
+    vec3 bestNormal;
+    bool hit = false;
+
+    // Check cylinder body
+    if (discriminant >= 0.0 && a > EPSILON) {
+        float sqrtD = sqrt(discriminant);
+        float t1 = (-b - sqrtD) / (2.0 * a);
+        float t2 = (-b + sqrtD) / (2.0 * a);
+
+        for (int i = 0; i < 2; i++) {
+            float t = (i == 0) ? t1 : t2;
+            if (t >= tMin && t < bestT) {
+                vec3 p = rayAt(r, t);
+                float h = dot(p - cyl.base, cyl.axis);
+                if (h >= 0.0 && h <= cyl.height) {
+                    bestT = t;
+                    vec3 centerOnAxis = cyl.base + h * cyl.axis;
+                    bestNormal = normalize(p - centerOnAxis);
+                    hit = true;
+                }
+            }
+        }
+    }
+
+    // Check caps if enabled
+    if (cyl.caps != 0u) {
+        // Bottom cap
+        float denom = dot(r.direction, cyl.axis);
+        if (abs(denom) > EPSILON) {
+            float t = dot(cyl.base - r.origin, cyl.axis) / denom;
+            if (t >= tMin && t < bestT) {
+                vec3 p = rayAt(r, t);
+                if (length(p - cyl.base) <= cyl.radius) {
+                    bestT = t;
+                    bestNormal = -cyl.axis;
+                    hit = true;
+                }
+            }
+
+            // Top cap
+            vec3 top = cyl.base + cyl.height * cyl.axis;
+            t = dot(top - r.origin, cyl.axis) / denom;
+            if (t >= tMin && t < bestT) {
+                vec3 p = rayAt(r, t);
+                if (length(p - top) <= cyl.radius) {
+                    bestT = t;
+                    bestNormal = cyl.axis;
+                    hit = true;
+                }
+            }
+        }
+    }
+
+    if (hit) {
+        rec.t = bestT;
+        rec.point = rayAt(r, bestT);
+        setFaceNormal(rec, r, bestNormal);
+        rec.materialId = cyl.materialId;
+    }
+
+    return hit;
+}
+
+// Cone intersection
+// Cone defined by base center, axis direction (pointing to tip), base radius, height
+bool hitCone(Cone cone, Ray r, float tMin, float tMax, inout HitRecord rec) {
+    vec3 tip = cone.base + cone.height * cone.axis;
+    vec3 oc = r.origin - tip;
+
+    // Cone half-angle
+    float tanTheta = cone.radius / cone.height;
+    float cosTheta2 = 1.0 / (1.0 + tanTheta * tanTheta);
+    float sinTheta2 = 1.0 - cosTheta2;
+
+    // Quadratic coefficients
+    float dDotA = dot(r.direction, -cone.axis);
+    float ocDotA = dot(oc, -cone.axis);
+
+    float a = dDotA * dDotA - cosTheta2;
+    float b = 2.0 * (dDotA * ocDotA - cosTheta2 * dot(r.direction, oc));
+    float c = ocDotA * ocDotA - cosTheta2 * dot(oc, oc);
+
+    float discriminant = b * b - 4.0 * a * c;
+
+    float bestT = tMax + 1.0;
+    vec3 bestNormal;
+    bool hit = false;
+
+    // Check cone surface
+    if (discriminant >= 0.0) {
+        float sqrtD = sqrt(discriminant);
+        float t1 = (-b - sqrtD) / (2.0 * a);
+        float t2 = (-b + sqrtD) / (2.0 * a);
+
+        for (int i = 0; i < 2; i++) {
+            float t = (i == 0) ? t1 : t2;
+            if (t >= tMin && t < bestT) {
+                vec3 p = rayAt(r, t);
+                float h = dot(tip - p, cone.axis);
+                if (h >= 0.0 && h <= cone.height) {
+                    bestT = t;
+                    // Normal: perpendicular to surface, pointing outward
+                    vec3 toTip = tip - p;
+                    vec3 axisComponent = dot(toTip, cone.axis) * cone.axis;
+                    vec3 radial = normalize(toTip - axisComponent);
+                    // Normal tilts outward from axis
+                    bestNormal = normalize(radial * cone.height + cone.axis * cone.radius);
+                    hit = true;
+                }
+            }
+        }
+    }
+
+    // Check base cap if enabled
+    if (cone.cap != 0u) {
+        float denom = dot(r.direction, cone.axis);
+        if (abs(denom) > EPSILON) {
+            float t = dot(cone.base - r.origin, cone.axis) / denom;
+            if (t >= tMin && t < bestT) {
+                vec3 p = rayAt(r, t);
+                if (length(p - cone.base) <= cone.radius) {
+                    bestT = t;
+                    bestNormal = -cone.axis;
+                    hit = true;
+                }
+            }
+        }
+    }
+
+    if (hit) {
+        rec.t = bestT;
+        rec.point = rayAt(r, bestT);
+        setFaceNormal(rec, r, bestNormal);
+        rec.materialId = cone.materialId;
+    }
+
+    return hit;
+}
+
 // Ground plane intersection (y = 0, bounded)
 bool hitGroundPlane(Ray r, float tMin, float tMax, inout HitRecord rec, uint materialId) {
     // Plane at y = 0 with normal pointing up
@@ -132,7 +292,7 @@ bool hitGroundPlane(Ray r, float tMin, float tMax, inout HitRecord rec, uint mat
 }
 
 // Scene intersection
-// Requires: spheres[], boxes[] buffers and pc.sphereCount, pc.boxCount
+// Requires: spheres[], boxes[], cylinders[], cones[] buffers and counts
 bool hitScene(Ray r, float tMin, float tMax, inout HitRecord rec) {
     HitRecord tempRec;
     bool hitAnything = false;
@@ -157,6 +317,24 @@ bool hitScene(Ray r, float tMin, float tMax, inout HitRecord rec) {
     // Check boxes
     for (uint i = 0; i < pc.boxCount; i++) {
         if (hitBox(boxes[i], r, tMin, closestSoFar, tempRec)) {
+            hitAnything = true;
+            closestSoFar = tempRec.t;
+            rec = tempRec;
+        }
+    }
+
+    // Check cylinders
+    for (uint i = 0; i < pc.cylinderCount; i++) {
+        if (hitCylinder(cylinders[i], r, tMin, closestSoFar, tempRec)) {
+            hitAnything = true;
+            closestSoFar = tempRec.t;
+            rec = tempRec;
+        }
+    }
+
+    // Check cones
+    for (uint i = 0; i < pc.coneCount; i++) {
+        if (hitCone(cones[i], r, tMin, closestSoFar, tempRec)) {
             hitAnything = true;
             closestSoFar = tempRec.t;
             rec = tempRec;

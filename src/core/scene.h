@@ -20,6 +20,8 @@ struct alignas(16) PushConstants {
     uint32_t maxBounces;
     uint32_t sphereCount;
     uint32_t boxCount;
+    uint32_t cylinderCount;
+    uint32_t coneCount;
     uint32_t spotLightCount;
     uint32_t width;
     uint32_t height;
@@ -47,6 +49,8 @@ public:
     // Geometry - add primitives
     void add(const Sphere& sphere) { m_spheres.push_back(sphere); }
     void add(const Box& box) { m_boxes.push_back(box); }
+    void add(const Cylinder& cyl) { m_cylinders.push_back(cyl); }
+    void add(const Cone& cone) { m_cones.push_back(cone); }
 
     // Convenience: add sphere by parameters
     void addSphere(Vec3 center, float radius, uint32_t materialId) {
@@ -56,6 +60,18 @@ public:
     // Convenience: add box by parameters
     void addBox(Vec3 center, Vec3 halfExtents, uint32_t materialId) {
         m_boxes.push_back({center, halfExtents, materialId, {}});
+    }
+
+    // Convenience: add cylinder by parameters
+    // axis should be normalized; caps=true by default
+    void addCylinder(Vec3 base, Vec3 axis, float radius, float height, uint32_t materialId, bool caps = true) {
+        m_cylinders.push_back({base, axis.normalized(), radius, height, materialId, caps ? 1u : 0u});
+    }
+
+    // Convenience: add cone by parameters
+    // axis points from base to tip; cap=true by default
+    void addCone(Vec3 base, Vec3 axis, float radius, float height, uint32_t materialId, bool cap = true) {
+        m_cones.push_back({base, axis.normalized(), radius, height, materialId, cap ? 1u : 0u});
     }
 
     // Lights
@@ -76,6 +92,8 @@ public:
     void clear() {
         m_spheres.clear();
         m_boxes.clear();
+        m_cylinders.clear();
+        m_cones.clear();
         m_spotLights.clear();
         m_materials.clear();
     }
@@ -83,6 +101,8 @@ public:
     // Accessors for renderer
     const std::vector<Sphere>& spheres() const { return m_spheres; }
     const std::vector<Box>& boxes() const { return m_boxes; }
+    const std::vector<Cylinder>& cylinders() const { return m_cylinders; }
+    const std::vector<Cone>& cones() const { return m_cones; }
     const std::vector<SpotLight>& spotLights() const { return m_spotLights; }
     const std::vector<Material>& materials() const { return m_materials; }
 
@@ -92,6 +112,8 @@ public:
     // Counts
     uint32_t sphereCount() const { return static_cast<uint32_t>(m_spheres.size()); }
     uint32_t boxCount() const { return static_cast<uint32_t>(m_boxes.size()); }
+    uint32_t cylinderCount() const { return static_cast<uint32_t>(m_cylinders.size()); }
+    uint32_t coneCount() const { return static_cast<uint32_t>(m_cones.size()); }
     uint32_t spotLightCount() const { return static_cast<uint32_t>(m_spotLights.size()); }
     uint32_t materialCount() const { return static_cast<uint32_t>(m_materials.size()); }
 
@@ -248,6 +270,8 @@ private:
 private:
     std::vector<Sphere> m_spheres;
     std::vector<Box> m_boxes;
+    std::vector<Cylinder> m_cylinders;
+    std::vector<Cone> m_cones;
     std::vector<SpotLight> m_spotLights;
     std::vector<Material> m_materials;
 };
