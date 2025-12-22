@@ -10,6 +10,7 @@ This directory contains Architecture Decision Records (ADRs) documenting signifi
 | [ADR-002](ADR-002-path-tracer-optimizations.md) | Path Tracer Optimizations | Active | Discovery log tracking optimizations (NEE, MIS, adaptive sampling, etc.) |
 | [ADR-003](ADR-003-modular-architecture.md) | Modular Architecture | Accepted | Refactor monolith into separate modules (geometry, materials, lights, scene, etc.) |
 | [ADR-004](ADR-004-geometry-primitives.md) | Geometry Primitives | Proposed | Define primitive types: analytic (sphere, box, cylinder), voxel chunks, triangle meshes |
+| [ADR-005](ADR-005-multi-target-build.md) | Multi-Target Build | Proposed | Static library + multiple demo executables sharing core renderer |
 
 ## Status Legend
 
