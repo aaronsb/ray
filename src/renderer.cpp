@@ -13,11 +13,12 @@
 RayTracingRenderer::RayTracingRenderer(QVulkanWindow* window)
     : m_window(window)
 {
-    auto [spheres, materials] = createTestScene();
-    m_spheres = std::move(spheres);
-    m_materials = std::move(materials);
+    auto scene = createTestScene();
+    m_spheres = std::move(scene.spheres);
+    m_boxes = std::move(scene.boxes);
+    m_materials = std::move(scene.materials);
 
-    m_camera.distance = 8.0f;
+    m_camera.distance = 12.0f;
     m_camera.elevation = 0.4f;
     m_camera.target = {0, 1.5f, 0};
 }
@@ -95,6 +96,14 @@ void RayTracingRenderer::releaseResources() {
     if (m_sphereBufferMemory) {
         m_devFuncs->vkFreeMemory(dev, m_sphereBufferMemory, nullptr);
         m_sphereBufferMemory = VK_NULL_HANDLE;
+    }
+    if (m_boxBuffer) {
+        m_devFuncs->vkDestroyBuffer(dev, m_boxBuffer, nullptr);
+        m_boxBuffer = VK_NULL_HANDLE;
+    }
+    if (m_boxBufferMemory) {
+        m_devFuncs->vkFreeMemory(dev, m_boxBufferMemory, nullptr);
+        m_boxBufferMemory = VK_NULL_HANDLE;
     }
     if (m_materialBuffer) {
         m_devFuncs->vkDestroyBuffer(dev, m_materialBuffer, nullptr);
@@ -189,12 +198,17 @@ void RayTracingRenderer::createStorageImages() {
 
 void RayTracingRenderer::createSceneBuffers() {
     VkDeviceSize sphereSize = sizeof(Sphere) * m_spheres.size();
+    VkDeviceSize boxSize = sizeof(Box) * std::max(m_boxes.size(), size_t(1));  // At least 1 to avoid 0-size buffer
     VkDeviceSize materialSize = sizeof(Material) * m_materials.size();
     VkDeviceSize cameraSize = sizeof(CameraData);
 
     createBuffer(sphereSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                  m_sphereBuffer, m_sphereBufferMemory);
+
+    createBuffer(boxSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 m_boxBuffer, m_boxBufferMemory);
 
     createBuffer(materialSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
@@ -212,6 +226,12 @@ void RayTracingRenderer::createSceneBuffers() {
     memcpy(data, m_spheres.data(), sphereSize);
     m_devFuncs->vkUnmapMemory(dev, m_sphereBufferMemory);
 
+    if (!m_boxes.empty()) {
+        m_devFuncs->vkMapMemory(dev, m_boxBufferMemory, 0, boxSize, 0, &data);
+        memcpy(data, m_boxes.data(), sizeof(Box) * m_boxes.size());
+        m_devFuncs->vkUnmapMemory(dev, m_boxBufferMemory);
+    }
+
     m_devFuncs->vkMapMemory(dev, m_materialBufferMemory, 0, materialSize, 0, &data);
     memcpy(data, m_materials.data(), materialSize);
     m_devFuncs->vkUnmapMemory(dev, m_materialBufferMemory);
@@ -226,7 +246,7 @@ void RayTracingRenderer::createDescriptorSet() {
     // Create descriptor pool
     std::array<VkDescriptorPoolSize, 3> poolSizes{};
     poolSizes[0] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2};
-    poolSizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2};
+    poolSizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3};  // spheres, materials, boxes
     poolSizes[2] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1};
 
     VkDescriptorPoolCreateInfo poolInfo{};
@@ -274,7 +294,12 @@ void RayTracingRenderer::createDescriptorSet() {
     cameraBufferInfo.offset = 0;
     cameraBufferInfo.range = VK_WHOLE_SIZE;
 
-    std::array<VkWriteDescriptorSet, 5> writes{};
+    VkDescriptorBufferInfo boxBufferInfo{};
+    boxBufferInfo.buffer = m_boxBuffer;
+    boxBufferInfo.offset = 0;
+    boxBufferInfo.range = VK_WHOLE_SIZE;
+
+    std::array<VkWriteDescriptorSet, 6> writes{};
 
     // Binding 0: output image
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -316,6 +341,14 @@ void RayTracingRenderer::createDescriptorSet() {
     writes[4].descriptorCount = 1;
     writes[4].pBufferInfo = &cameraBufferInfo;
 
+    // Binding 5: boxes buffer
+    writes[5].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[5].dstSet = m_descriptorSet;
+    writes[5].dstBinding = 5;
+    writes[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[5].descriptorCount = 1;
+    writes[5].pBufferInfo = &boxBufferInfo;
+
     m_devFuncs->vkUpdateDescriptorSets(dev, writes.size(), writes.data(), 0, nullptr);
 }
 
@@ -323,7 +356,7 @@ void RayTracingRenderer::createComputePipeline() {
     VkDevice dev = m_window->device();
 
     // Create descriptor set layout
-    std::array<VkDescriptorSetLayoutBinding, 5> bindings{};
+    std::array<VkDescriptorSetLayoutBinding, 6> bindings{};
 
     // Binding 0: output image
     bindings[0].binding = 0;
@@ -354,6 +387,12 @@ void RayTracingRenderer::createComputePipeline() {
     bindings[4].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     bindings[4].descriptorCount = 1;
     bindings[4].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    // Binding 5: boxes SSBO
+    bindings[5].binding = 5;
+    bindings[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[5].descriptorCount = 1;
+    bindings[5].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -433,6 +472,7 @@ void RayTracingRenderer::recordComputeCommands(VkCommandBuffer cmdBuf, bool isSt
     pc.sampleCount = 1;
     pc.maxBounces = 5;
     pc.sphereCount = static_cast<uint32_t>(m_spheres.size());
+    pc.boxCount = static_cast<uint32_t>(m_boxes.size());
     pc.width = sz.width();
     pc.height = sz.height();
     pc.useNEE = 1;

@@ -52,6 +52,7 @@ private:
     // Scene data
     OrbitCamera m_camera;
     std::vector<Sphere> m_spheres;
+    std::vector<Box> m_boxes;
     std::vector<Material> m_materials;
 
     // Vulkan resources
@@ -74,6 +75,8 @@ private:
     // Scene buffers
     VkBuffer m_sphereBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_sphereBufferMemory = VK_NULL_HANDLE;
+    VkBuffer m_boxBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_boxBufferMemory = VK_NULL_HANDLE;
     VkBuffer m_materialBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_materialBufferMemory = VK_NULL_HANDLE;
 

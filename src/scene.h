@@ -71,6 +71,14 @@ struct alignas(16) Sphere {
     float _pad[2];         // pad to 16 bytes
 };
 
+// GPU box (axis-aligned) - 48 bytes, 16-byte aligned
+struct alignas(16) Box {
+    Vec3 center;           // 16 bytes (padded)
+    Vec3 halfExtents;      // 16 bytes (padded) - size/2 in each dimension
+    uint32_t materialId;
+    float _pad[3];         // pad to 16 bytes
+};
+
 // Camera uniform data - matches shader layout
 struct alignas(16) CameraData {
     Vec3 origin;
@@ -88,13 +96,14 @@ struct alignas(16) PushConstants {
     uint32_t sampleCount;
     uint32_t maxBounces;
     uint32_t sphereCount;
+    uint32_t boxCount;
     uint32_t width;
     uint32_t height;
     uint32_t useNEE;
     uint32_t accumulate;  // 0 = no accumulation (moving), 1 = accumulate (stationary)
     float sunElevation;   // radians, 0 = horizon, PI/2 = zenith
     float sunAzimuth;     // radians, angle around Y axis
-    float _pad[2];
+    float _pad;
 };
 
 // Orbit camera controller
@@ -177,10 +186,19 @@ public:
     }
 };
 
-// Default test scene: Cornell box-ish with spheres
-inline std::pair<std::vector<Sphere>, std::vector<Material>> createTestScene() {
-    std::vector<Material> materials;
+// Scene data container
+struct SceneData {
     std::vector<Sphere> spheres;
+    std::vector<Box> boxes;
+    std::vector<Material> materials;
+};
+
+// Default test scene: spheres and boxes
+inline SceneData createTestScene() {
+    SceneData scene;
+    auto& materials = scene.materials;
+    auto& spheres = scene.spheres;
+    auto& boxes = scene.boxes;
 
     // Material 0: White diffuse (floor, ceiling, back wall)
     materials.push_back({{0.73f, 0.73f, 0.73f}, {0, 0, 0}, (uint32_t)MaterialType::Diffuse, 0, 0});
@@ -197,7 +215,7 @@ inline std::pair<std::vector<Sphere>, std::vector<Material>> createTestScene() {
     // Material 4: Metal sphere (slightly rough)
     materials.push_back({{0.8f, 0.8f, 0.9f}, {0, 0, 0}, (uint32_t)MaterialType::Metal, 0.05f, 0});
 
-    // Material 5: Glass sphere (clear)
+    // Material 5: Glass (clear dielectric)
     materials.push_back({{1, 1, 1}, {0, 0, 0}, (uint32_t)MaterialType::Dielectric, 1.5f, 0});
 
     // Material 6: White diffuse (for white balance reference)
@@ -206,13 +224,14 @@ inline std::pair<std::vector<Sphere>, std::vector<Material>> createTestScene() {
     // Material 7: Frosted glass (rough dielectric)
     materials.push_back({{1, 1, 1}, {0, 0, 0}, (uint32_t)MaterialType::RoughDielectric, 1.5f, 0.15f});
 
-    // Material 8: Brushed steel (anisotropic metal)
-    materials.push_back({{0.7f, 0.7f, 0.75f}, {0, 0, 0}, (uint32_t)MaterialType::AnisotropicMetal, 0.3f, 0.1f});
+    // Material 8: Perfect mirror
+    materials.push_back({{0.95f, 0.95f, 0.95f}, {0, 0, 0}, (uint32_t)MaterialType::Metal, 0.0f, 0});
 
-    // Material 9: Thin-film interference (soap bubble / oil slick)
-    // param = film thickness in nm (300-800 for visible colors)
-    // albedo is base color when interference is weak
-    materials.push_back({{0.9f, 0.9f, 0.95f}, {0, 0, 0}, (uint32_t)MaterialType::Dichroic, 400.0f, 0});
+    // Material 9: Thin-film interference (tunable spectrum)
+    // param = peak wavelength position (0 = violet, 0.5 = green, 1 = red)
+    // param2 = bandwidth (0 = sharp/saturated, 1 = broad/pastel)
+    // This one peaks in cyan/green region
+    materials.push_back({{0.9f, 0.9f, 0.95f}, {0, 0, 0}, (uint32_t)MaterialType::Dichroic, 0.35f, 0.2f});
 
     // Material 10: Green Marble (deep teal-green base, white veins + gold)
     // param = noise scale, albedo = base, emission = vein color
@@ -230,6 +249,25 @@ inline std::pair<std::vector<Sphere>, std::vector<Material>> createTestScene() {
     // param = checker scale, albedo = color1, emission = color2
     materials.push_back({{0.9f, 0.9f, 0.9f}, {0.2f, 0.2f, 0.2f}, (uint32_t)MaterialType::Checker, 1.0f, 0});
 
+    // Material 14: Dichroic - red/orange peak (like a beetle shell)
+    materials.push_back({{0.95f, 0.9f, 0.85f}, {0, 0, 0}, (uint32_t)MaterialType::Dichroic, 0.85f, 0.15f});
+
+    // Material 15: Dichroic - violet/blue peak (like a morpho butterfly)
+    materials.push_back({{0.85f, 0.9f, 0.95f}, {0, 0, 0}, (uint32_t)MaterialType::Dichroic, 0.1f, 0.1f});
+
+    // Material 16: Dichroic - broad spectrum (soap bubble rainbow)
+    materials.push_back({{0.95f, 0.95f, 0.95f}, {0, 0, 0}, (uint32_t)MaterialType::Dichroic, 0.5f, 0.6f});
+
+    // Materials 17-23: ROYGBIV dichroic spectrum array
+    // Sharp/saturated (param2 = 0.1) to show distinct colors
+    materials.push_back({{0.95f, 0.95f, 0.95f}, {0, 0, 0}, (uint32_t)MaterialType::Dichroic, 1.0f, 0.1f});    // 17: Red
+    materials.push_back({{0.95f, 0.95f, 0.95f}, {0, 0, 0}, (uint32_t)MaterialType::Dichroic, 0.833f, 0.1f}); // 18: Orange
+    materials.push_back({{0.95f, 0.95f, 0.95f}, {0, 0, 0}, (uint32_t)MaterialType::Dichroic, 0.667f, 0.1f}); // 19: Yellow
+    materials.push_back({{0.95f, 0.95f, 0.95f}, {0, 0, 0}, (uint32_t)MaterialType::Dichroic, 0.5f, 0.1f});   // 20: Green
+    materials.push_back({{0.95f, 0.95f, 0.95f}, {0, 0, 0}, (uint32_t)MaterialType::Dichroic, 0.333f, 0.1f}); // 21: Blue
+    materials.push_back({{0.95f, 0.95f, 0.95f}, {0, 0, 0}, (uint32_t)MaterialType::Dichroic, 0.167f, 0.1f}); // 22: Indigo
+    materials.push_back({{0.95f, 0.95f, 0.95f}, {0, 0, 0}, (uint32_t)MaterialType::Dichroic, 0.0f, 0.1f});   // 23: Violet
+
     // Ground plane (checker pattern) - large sphere acts as floor
     // (Note: shader uses hitGroundPlane() instead, this is skipped)
     const float wallRadius = 142.0f;
@@ -238,7 +276,8 @@ inline std::pair<std::vector<Sphere>, std::vector<Material>> createTestScene() {
     // Sun is now in the sky shader, not a physical sphere
     // Emissive spheres in the scene will still emit light
 
-    // Original spheres (front row)
+    // === SPHERES ===
+    // Front row
     // Metal sphere (polished)
     spheres.push_back({{-2.5f, 1.0f, 2}, 1.0f, 4});
 
@@ -252,7 +291,7 @@ inline std::pair<std::vector<Sphere>, std::vector<Material>> createTestScene() {
     // Frosted glass
     spheres.push_back({{-2.5f, 1.0f, -1}, 1.0f, 7});
 
-    // Brushed steel
+    // Perfect mirror
     spheres.push_back({{0, 1.0f, -1}, 1.0f, 8});
 
     // Dichroic / thin-film
@@ -268,5 +307,47 @@ inline std::pair<std::vector<Sphere>, std::vector<Material>> createTestScene() {
     // Swirl
     spheres.push_back({{2.5f, 1.0f, -4}, 1.0f, 12});
 
-    return {spheres, materials};
+    // === BOXES ===
+    // Glass cube (clear refractive) - to the right of spheres
+    boxes.push_back({{5.0f, 0.75f, 1.0f}, {0.75f, 0.75f, 0.75f}, 5});
+
+    // Mirror cube - to the left
+    boxes.push_back({{-5.0f, 0.6f, 0.0f}, {0.6f, 0.6f, 0.6f}, 8});
+
+    // Frosted glass tall box
+    boxes.push_back({{5.5f, 1.0f, -2.5f}, {0.5f, 1.0f, 0.5f}, 7});
+
+    // Small glass cube
+    boxes.push_back({{-4.5f, 0.4f, 2.5f}, {0.4f, 0.4f, 0.4f}, 5});
+
+    // Wood pedestal
+    boxes.push_back({{-5.5f, 0.3f, -3.0f}, {0.8f, 0.3f, 0.8f}, 11});
+
+    // Marble block
+    boxes.push_back({{6.0f, 0.5f, -4.0f}, {0.5f, 0.5f, 1.0f}, 10});
+
+    // Dichroic showcase - different spectrum peaks
+    // Red/orange dichroic cube
+    boxes.push_back({{-6.5f, 0.5f, 1.5f}, {0.5f, 0.5f, 0.5f}, 14});
+
+    // Blue/violet dichroic cube
+    boxes.push_back({{6.5f, 0.5f, 1.5f}, {0.5f, 0.5f, 0.5f}, 15});
+
+    // Rainbow/soap bubble sphere (front center-ish)
+    spheres.push_back({{0.0f, 0.6f, 4.0f}, 0.6f, 16});
+
+    // === ROYGBIV Dichroic Spectrum Array ===
+    // 7 spheres in a line, each tuned to a different spectral color
+    const float roygbivRadius = 0.5f;
+    const float roygbivSpacing = 1.2f;
+    const float roygbivZ = 5.5f;  // Front of scene
+    const float roygbivY = roygbivRadius;  // Sitting on ground
+    const float roygbivStartX = -3.6f;  // Centered around x=0
+
+    for (int i = 0; i < 7; i++) {
+        float x = roygbivStartX + i * roygbivSpacing;
+        spheres.push_back({{x, roygbivY, roygbivZ}, roygbivRadius, uint32_t(17 + i)});
+    }
+
+    return scene;
 }
