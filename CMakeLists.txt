@@ -37,10 +37,12 @@ foreach(SHADER ${SHADERS})
     get_filename_component(SHADER_NAME ${SHADER} NAME_WE)
     set(SHADER_SRC ${SHADER_SOURCE_DIR}/${SHADER})
     set(SHADER_SPV ${SHADER_BINARY_DIR}/${SHADER_NAME}.spv)
+    # Collect all include files as dependencies
+    file(GLOB SHADER_INCLUDES ${SHADER_SOURCE_DIR}/includes/*.glsl)
     add_custom_command(
         OUTPUT ${SHADER_SPV}
-        COMMAND ${GLSLC} -O --target-env=vulkan1.2 ${SHADER_SRC} -o ${SHADER_SPV}
-        DEPENDS ${SHADER_SRC}
+        COMMAND ${GLSLC} -O --target-env=vulkan1.2 -I${SHADER_SOURCE_DIR}/includes ${SHADER_SRC} -o ${SHADER_SPV}
+        DEPENDS ${SHADER_SRC} ${SHADER_INCLUDES}
         COMMENT "Compiling ${SHADER}"
     )
     list(APPEND SHADER_SPV_FILES ${SHADER_SPV})

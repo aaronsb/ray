@@ -6,50 +6,53 @@ layout(local_size_x = 16, local_size_y = 16) in;
 layout(rgba8, set = 0, binding = 0) uniform writeonly image2D outputImage;
 layout(rgba32f, set = 0, binding = 1) uniform image2D accumImage;
 
-// Scene data - must match C++ struct layout exactly
-// C++ Vec3 has explicit 4-byte padding, making it 16 bytes
+// ============ GPU STRUCTS ============
+// Must match C++ struct layout exactly
+
 struct Sphere {
     vec3 center;
-    float _center_pad;   // C++ Vec3._pad
+    float _center_pad;
     float radius;
     uint materialId;
     float _pad[2];
-};  // Total: 32 bytes
+};
 
 struct Box {
     vec3 center;
-    float _center_pad;   // C++ Vec3._pad
+    float _center_pad;
     vec3 halfExtents;
-    float _halfExt_pad;  // C++ Vec3._pad
+    float _halfExt_pad;
     uint materialId;
     float _pad[3];
-};  // Total: 48 bytes
+};
 
 struct SpotLight {
     vec3 position;
     float _pos_pad;
-    vec3 direction;      // normalized
+    vec3 direction;
     float _dir_pad;
-    vec3 color;          // emission color/intensity
+    vec3 color;
     float _col_pad;
-    float innerAngle;    // radians - full intensity cone
-    float outerAngle;    // radians - falloff to zero
-    uint goboType;       // 0=none, 1=stripes, 2=grid, 3=circles, 4=dots, 5=star
-    float goboScale;     // pattern scale
-    float goboRotation;  // pattern rotation in radians
+    float innerAngle;
+    float outerAngle;
+    uint goboType;
+    float goboScale;
+    float goboRotation;
     float _pad[3];
-};  // Total: 80 bytes
+};
 
 struct Material {
     vec3 albedo;
     float _pad1;
-    vec3 emission;      // also secondary color for dichroic
+    vec3 emission;
     float _pad2;
-    uint type;          // 0=diffuse, 1=metal, 2=dielectric, 3=emissive, 4=rough dielectric, 5=anisotropic metal, 6=dichroic
-    float param;        // roughness or IOR
-    float param2;       // secondary param (roughness for rough dielectric, anisotropy for brushed)
+    uint type;
+    float param;
+    float param2;
     float _pad3;
 };
+
+// ============ BUFFERS ============
 
 layout(std430, set = 0, binding = 2) readonly buffer SphereBuffer {
     Sphere spheres[];
@@ -81,9 +84,9 @@ layout(std140, set = 0, binding = 4) uniform CameraUBO {
     vec3 v;
     float _pad6;
     vec3 w;
-    float _pad7;           // C++ Vec3._pad for w
-    float lensRadius;      // offset 112 in C++
-    float _padEnd[3];      // C++ _pad[3]
+    float _pad7;
+    float lensRadius;
+    float _padEnd[3];
 } camera;
 
 layout(push_constant) uniform PushConstants {
@@ -96,784 +99,32 @@ layout(push_constant) uniform PushConstants {
     uint width;
     uint height;
     uint useNEE;
-    uint accumulate;  // 0 = single frame (moving), 1 = accumulate (stationary)
-    float sunElevation;  // radians
-    float sunAzimuth;    // radians
+    uint accumulate;
+    float sunElevation;
+    float sunAzimuth;
 } pc;
 
-// Constants
+// ============ CONSTANTS ============
+
 const float PI = 3.14159265359;
 const float EPSILON = 0.0001;
 const float T_MAX = 10000.0;
 
-// ============ NOISE FUNCTIONS ============
+// ============ INCLUDES ============
 
-// Hash function for noise
-vec3 hash3(vec3 p) {
-    p = vec3(dot(p, vec3(127.1, 311.7, 74.7)),
-             dot(p, vec3(269.5, 183.3, 246.1)),
-             dot(p, vec3(113.5, 271.9, 124.6)));
-    return fract(sin(p) * 43758.5453123);
-}
+#include "noise.glsl"
+#include "random.glsl"
+#include "geometry.glsl"
+#include "materials.glsl"
+#include "lights.glsl"
 
-float hash1(vec3 p) {
-    return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453123);
-}
+// ============ PATH TRACING ============
 
-// Perlin-style gradient noise
-float gradientNoise(vec3 p) {
-    vec3 i = floor(p);
-    vec3 f = fract(p);
-    vec3 u = f * f * (3.0 - 2.0 * f);  // smoothstep
-
-    return mix(mix(mix(dot(hash3(i + vec3(0,0,0)) * 2.0 - 1.0, f - vec3(0,0,0)),
-                       dot(hash3(i + vec3(1,0,0)) * 2.0 - 1.0, f - vec3(1,0,0)), u.x),
-                   mix(dot(hash3(i + vec3(0,1,0)) * 2.0 - 1.0, f - vec3(0,1,0)),
-                       dot(hash3(i + vec3(1,1,0)) * 2.0 - 1.0, f - vec3(1,1,0)), u.x), u.y),
-               mix(mix(dot(hash3(i + vec3(0,0,1)) * 2.0 - 1.0, f - vec3(0,0,1)),
-                       dot(hash3(i + vec3(1,0,1)) * 2.0 - 1.0, f - vec3(1,0,1)), u.x),
-                   mix(dot(hash3(i + vec3(0,1,1)) * 2.0 - 1.0, f - vec3(0,1,1)),
-                       dot(hash3(i + vec3(1,1,1)) * 2.0 - 1.0, f - vec3(1,1,1)), u.x), u.y), u.z);
-}
-
-// Fractal Brownian Motion - layered noise
-float fbm(vec3 p, int octaves) {
-    float value = 0.0;
-    float amplitude = 0.5;
-    float frequency = 1.0;
-    for (int i = 0; i < octaves; i++) {
-        value += amplitude * gradientNoise(p * frequency);
-        amplitude *= 0.5;
-        frequency *= 2.0;
-    }
-    return value;
-}
-
-// Worley (cellular) noise - returns distance to nearest cell point
-float worleyNoise(vec3 p) {
-    vec3 i = floor(p);
-    vec3 f = fract(p);
-
-    float minDist = 1.0;
-    for (int x = -1; x <= 1; x++) {
-        for (int y = -1; y <= 1; y++) {
-            for (int z = -1; z <= 1; z++) {
-                vec3 neighbor = vec3(x, y, z);
-                vec3 cellPoint = hash3(i + neighbor);
-                vec3 diff = neighbor + cellPoint - f;
-                float dist = length(diff);
-                minDist = min(minDist, dist);
-            }
-        }
-    }
-    return minDist;
-}
-
-// Turbulence - absolute value of noise layers (sharp creases)
-float turbulence(vec3 p, int octaves) {
-    float value = 0.0;
-    float amplitude = 0.5;
-    float frequency = 1.0;
-    for (int i = 0; i < octaves; i++) {
-        value += amplitude * abs(gradientNoise(p * frequency));
-        amplitude *= 0.5;
-        frequency *= 2.0;
-    }
-    return value;
-}
-
-// PCG random number generator state
-uint rngState;
-
-// PCG hash
-uint pcg_hash(uint val) {
-    uint state = val * 747796405u + 2891336453u;
-    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
-    return (word >> 22u) ^ word;
-}
-
-void initRNG(uvec2 pixel, uint frame) {
-    rngState = pcg_hash(pixel.x + pixel.y * pc.width + frame * pc.width * pc.height);
-}
-
-float rand() {
-    rngState = pcg_hash(rngState);
-    return float(rngState) / float(0xFFFFFFFFu);
-}
-
-vec2 rand2() {
-    return vec2(rand(), rand());
-}
-
-vec3 rand3() {
-    return vec3(rand(), rand(), rand());
-}
-
-// Random direction in unit sphere
-vec3 randomInUnitSphere() {
-    vec3 p;
-    do {
-        p = rand3() * 2.0 - 1.0;
-    } while (dot(p, p) >= 1.0);
-    return p;
-}
-
-// Random unit vector (for Lambertian)
-vec3 randomUnitVector() {
-    float z = rand() * 2.0 - 1.0;
-    float a = rand() * 2.0 * PI;
-    float r = sqrt(1.0 - z * z);
-    return vec3(r * cos(a), r * sin(a), z);
-}
-
-// Random in hemisphere
-vec3 randomInHemisphere(vec3 normal) {
-    vec3 inUnitSphere = randomInUnitSphere();
-    if (dot(inUnitSphere, normal) > 0.0)
-        return inUnitSphere;
-    else
-        return -inUnitSphere;
-}
-
-// Ray structure
-struct Ray {
-    vec3 origin;
-    vec3 direction;
-};
-
-vec3 rayAt(Ray r, float t) {
-    return r.origin + t * r.direction;
-}
-
-// Hit record
-struct HitRecord {
-    vec3 point;
-    vec3 normal;
-    float t;
-    uint materialId;
-    bool frontFace;
-};
-
-void setFaceNormal(inout HitRecord rec, Ray r, vec3 outwardNormal) {
-    rec.frontFace = dot(r.direction, outwardNormal) < 0.0;
-    rec.normal = rec.frontFace ? outwardNormal : -outwardNormal;
-}
-
-// Sphere intersection
-bool hitSphere(Sphere sphere, Ray r, float tMin, float tMax, inout HitRecord rec) {
-    vec3 oc = r.origin - sphere.center;
-    float a = dot(r.direction, r.direction);
-    float halfB = dot(oc, r.direction);
-    float c = dot(oc, oc) - sphere.radius * sphere.radius;
-
-    float discriminant = halfB * halfB - a * c;
-    if (discriminant < 0.0) return false;
-
-    float sqrtD = sqrt(discriminant);
-    float root = (-halfB - sqrtD) / a;
-    if (root < tMin || root > tMax) {
-        root = (-halfB + sqrtD) / a;
-        if (root < tMin || root > tMax)
-            return false;
-    }
-
-    rec.t = root;
-    rec.point = rayAt(r, root);
-    vec3 outwardNormal = (rec.point - sphere.center) / sphere.radius;
-    setFaceNormal(rec, r, outwardNormal);
-    rec.materialId = sphere.materialId;
-
-    return true;
-}
-
-// Axis-aligned box intersection (slab method)
-bool hitBox(Box box, Ray r, float tMin, float tMax, inout HitRecord rec) {
-    vec3 bmin = box.center - box.halfExtents;
-    vec3 bmax = box.center + box.halfExtents;
-
-    vec3 invDir = 1.0 / r.direction;
-
-    vec3 t0 = (bmin - r.origin) * invDir;
-    vec3 t1 = (bmax - r.origin) * invDir;
-
-    vec3 tNear = min(t0, t1);
-    vec3 tFar = max(t0, t1);
-
-    float tEnter = max(max(tNear.x, tNear.y), tNear.z);
-    float tExit = min(min(tFar.x, tFar.y), tFar.z);
-
-    // No intersection if exit before enter, or outside range
-    if (tExit < tEnter || tExit < tMin || tEnter > tMax) return false;
-
-    // Determine which t to use (prefer entry point if valid)
-    float t = tEnter;
-    if (t < tMin) t = tExit;
-    if (t < tMin || t > tMax) return false;
-
-    rec.t = t;
-    rec.point = rayAt(r, t);
-    rec.materialId = box.materialId;
-
-    // Compute normal from which face was hit
-    vec3 localPoint = rec.point - box.center;
-    vec3 absLocal = abs(localPoint);
-    vec3 halfExt = box.halfExtents;
-
-    // Find which face we hit (largest component relative to half-extent)
-    vec3 d = absLocal / halfExt;
-    vec3 normal;
-    if (d.x > d.y && d.x > d.z) {
-        normal = vec3(sign(localPoint.x), 0.0, 0.0);
-    } else if (d.y > d.z) {
-        normal = vec3(0.0, sign(localPoint.y), 0.0);
-    } else {
-        normal = vec3(0.0, 0.0, sign(localPoint.z));
-    }
-
-    setFaceNormal(rec, r, normal);
-    return true;
-}
-
-// Ground plane intersection (y = 0, bounded)
-bool hitGroundPlane(Ray r, float tMin, float tMax, inout HitRecord rec, uint materialId) {
-    // Plane at y = 0 with normal pointing up
-    if (abs(r.direction.y) < 0.0001) return false;  // ray parallel to plane
-
-    float t = -r.origin.y / r.direction.y;
-    if (t < tMin || t > tMax) return false;
-
-    // Compute hit point with better precision for y=0 plane
-    // Instead of origin + t * direction (which loses precision for large t),
-    // compute x,z directly using similar triangles
-    float invDirY = 1.0 / r.direction.y;
-    vec3 hitPoint;
-    hitPoint.x = r.origin.x - r.origin.y * r.direction.x * invDirY;
-    hitPoint.y = 0.0;  // Exactly on the plane
-    hitPoint.z = r.origin.z - r.origin.y * r.direction.z * invDirY;
-
-    // Bound the plane to a reasonable size (50 unit radius)
-    float distFromOrigin = length(hitPoint.xz);
-    if (distFromOrigin > 50.0) return false;
-
-    rec.t = t;
-    rec.point = hitPoint;
-    rec.normal = vec3(0.0, 1.0, 0.0);  // always up
-    rec.frontFace = r.direction.y < 0.0;
-    if (!rec.frontFace) rec.normal = -rec.normal;
-    rec.materialId = materialId;
-    return true;
-}
-
-// Scene intersection
-bool hitScene(Ray r, float tMin, float tMax, inout HitRecord rec) {
-    HitRecord tempRec;
-    bool hitAnything = false;
-    float closestSoFar = tMax;
-
-    // Check ground plane first (material 13 = checker)
-    if (hitGroundPlane(r, tMin, closestSoFar, tempRec, 13)) {
-        hitAnything = true;
-        closestSoFar = tempRec.t;
-        rec = tempRec;
-    }
-
-    // Check spheres (skip index 0 which was the floor sphere)
-    for (uint i = 1; i < pc.sphereCount; i++) {
-        if (hitSphere(spheres[i], r, tMin, closestSoFar, tempRec)) {
-            hitAnything = true;
-            closestSoFar = tempRec.t;
-            rec = tempRec;
-        }
-    }
-
-    // Check boxes
-    for (uint i = 0; i < pc.boxCount; i++) {
-        if (hitBox(boxes[i], r, tMin, closestSoFar, tempRec)) {
-            hitAnything = true;
-            closestSoFar = tempRec.t;
-            rec = tempRec;
-        }
-    }
-
-    return hitAnything;
-}
-
-// Schlick approximation for Fresnel
-float schlick(float cosine, float refIdx) {
-    float r0 = (1.0 - refIdx) / (1.0 + refIdx);
-    r0 = r0 * r0;
-    return r0 + (1.0 - r0) * pow(1.0 - cosine, 5.0);
-}
-
-// Custom refract (avoiding name conflict with builtin)
-vec3 refractRay(vec3 uv, vec3 n, float etaiOverEtat) {
-    float cosTheta = min(dot(-uv, n), 1.0);
-    vec3 rOutPerp = etaiOverEtat * (uv + cosTheta * n);
-    vec3 rOutParallel = -sqrt(abs(1.0 - dot(rOutPerp, rOutPerp))) * n;
-    return rOutPerp + rOutParallel;
-}
-
-// Material scattering
-bool scatter(Ray rIn, HitRecord rec, out vec3 attenuation, out Ray scattered) {
-    Material mat = materials[rec.materialId];
-
-    if (mat.type == 0) {
-        // Diffuse (Lambertian)
-        vec3 scatterDir = rec.normal + randomUnitVector();
-        if (dot(scatterDir, scatterDir) < EPSILON)
-            scatterDir = rec.normal;
-        scattered = Ray(rec.point, normalize(scatterDir));
-        attenuation = mat.albedo;
-        return true;
-    }
-    else if (mat.type == 1) {
-        // Metal
-        vec3 reflected = reflect(normalize(rIn.direction), rec.normal);
-        reflected += mat.param * randomInUnitSphere(); // roughness
-        scattered = Ray(rec.point, normalize(reflected));
-        attenuation = mat.albedo;
-        return dot(scattered.direction, rec.normal) > 0.0;
-    }
-    else if (mat.type == 2) {
-        // Dielectric (glass)
-        attenuation = vec3(1.0);
-        float refractionRatio = rec.frontFace ? (1.0 / mat.param) : mat.param;
-
-        vec3 unitDir = normalize(rIn.direction);
-        float cosTheta = min(dot(-unitDir, rec.normal), 1.0);
-        float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
-
-        bool cannotRefract = refractionRatio * sinTheta > 1.0;
-        vec3 direction;
-
-        if (cannotRefract || schlick(cosTheta, refractionRatio) > rand())
-            direction = reflect(unitDir, rec.normal);
-        else
-            direction = refractRay(unitDir, rec.normal, refractionRatio);
-
-        scattered = Ray(rec.point, direction);
-        return true;
-    }
-    else if (mat.type == 3) {
-        // Emissive - no scattering
-        return false;
-    }
-    else if (mat.type == 4) {
-        // Rough Dielectric (frosted glass)
-        // Like dielectric but with roughness perturbation
-        attenuation = vec3(1.0);
-        float refractionRatio = rec.frontFace ? (1.0 / mat.param) : mat.param;
-
-        vec3 unitDir = normalize(rIn.direction);
-        float cosTheta = min(dot(-unitDir, rec.normal), 1.0);
-        float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
-
-        bool cannotRefract = refractionRatio * sinTheta > 1.0;
-        vec3 direction;
-
-        if (cannotRefract || schlick(cosTheta, refractionRatio) > rand())
-            direction = reflect(unitDir, rec.normal);
-        else
-            direction = refractRay(unitDir, rec.normal, refractionRatio);
-
-        // Add roughness perturbation (frosted effect)
-        direction = normalize(direction + mat.param2 * randomInUnitSphere());
-
-        scattered = Ray(rec.point, direction);
-        return true;
-    }
-    else if (mat.type == 5) {
-        // Anisotropic Metal (brushed steel)
-        // Roughness is stretched in one direction
-        vec3 reflected = reflect(normalize(rIn.direction), rec.normal);
-
-        // Create tangent frame (brushed direction along surface)
-        vec3 tangent = normalize(cross(rec.normal, vec3(0.0, 1.0, 0.0)));
-        if (length(tangent) < 0.001)
-            tangent = normalize(cross(rec.normal, vec3(1.0, 0.0, 0.0)));
-        vec3 bitangent = cross(rec.normal, tangent);
-
-        // Anisotropic roughness: more blur along tangent, less along bitangent
-        float roughT = mat.param;                    // roughness along tangent (brush direction)
-        float roughB = mat.param * mat.param2;       // roughness perpendicular (param2 = anisotropy ratio)
-
-        vec2 rnd = rand2();
-        vec3 perturbation = tangent * (rnd.x * 2.0 - 1.0) * roughT +
-                           bitangent * (rnd.y * 2.0 - 1.0) * roughB;
-
-        reflected = normalize(reflected + perturbation);
-        scattered = Ray(rec.point, reflected);
-        attenuation = mat.albedo;
-        return dot(scattered.direction, rec.normal) > 0.0;
-    }
-    else if (mat.type == 6) {
-        // Dichroic coated glass - thin film interference on reflection, glass refraction
-        // param = peak wavelength position (0 = violet 400nm, 1 = red 700nm)
-        // param2 = bandwidth (0 = sharp/saturated, 1 = broad/pastel)
-
-        float glassIOR = 1.5;  // Standard glass
-        float filmIOR = 1.4;   // Thin film coating
-
-        vec3 unitDir = normalize(rIn.direction);
-        float cosTheta = min(dot(-unitDir, rec.normal), 1.0);
-        float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
-
-        // === Calculate thin-film interference color ===
-        float sinTheta2 = 1.0 - cosTheta * cosTheta;
-        float cosRefracted = sqrt(max(0.0, 1.0 - sinTheta2 / (filmIOR * filmIOR)));
-
-        float peakWavelength = mix(400.0, 700.0, mat.param);
-        float thickness = peakWavelength / (2.0 * filmIOR * cosRefracted);
-        float pathDiff = 2.0 * filmIOR * thickness * cosRefracted;
-
-        float wavelengths[7] = float[](650.0, 600.0, 570.0, 540.0, 490.0, 450.0, 420.0);
-        vec3 spectralRGB[7] = vec3[](
-            vec3(1.0, 0.0, 0.0),    // Red
-            vec3(1.0, 0.5, 0.0),    // Orange
-            vec3(1.0, 1.0, 0.0),    // Yellow
-            vec3(0.0, 1.0, 0.0),    // Green
-            vec3(0.0, 0.7, 1.0),    // Cyan
-            vec3(0.0, 0.0, 1.0),    // Blue
-            vec3(0.4, 0.0, 1.0)     // Violet
-        );
-
-        float sharpness = mix(4.0, 1.0, mat.param2);
-        vec3 interferenceColor = vec3(0.0);
-        for (int i = 0; i < 7; i++) {
-            float phase = pathDiff / wavelengths[i];
-            float interference = pow(0.5 + 0.5 * cos(phase * 2.0 * PI), sharpness);
-            interferenceColor += interference * spectralRGB[i];
-        }
-        interferenceColor /= 3.5;
-
-        // === Glass refraction logic (like dielectric) ===
-        float refractionRatio = rec.frontFace ? (1.0 / glassIOR) : glassIOR;
-        bool cannotRefract = refractionRatio * sinTheta > 1.0;
-
-        // Enhanced Fresnel for coated surface - more reflective due to film
-        float baseReflect = schlick(cosTheta, refractionRatio);
-        // Thin film boosts reflection, especially at angles
-        float filmBoost = 0.15 + 0.25 * pow(1.0 - cosTheta, 2.0);
-        float reflectProb = min(baseReflect + filmBoost, 0.95);
-
-        if (cannotRefract || rand() < reflectProb) {
-            // Reflect with interference color
-            vec3 reflected = reflect(unitDir, rec.normal);
-            scattered = Ray(rec.point, reflected);
-            // Reflection gets the dichroic color
-            attenuation = interferenceColor;
-        } else {
-            // Refract through like glass - mostly clear with slight tint
-            vec3 refracted = refractRay(unitDir, rec.normal, refractionRatio);
-            scattered = Ray(rec.point, refracted);
-            // Transmission is mostly clear, slight complementary tint
-            attenuation = vec3(1.0) - interferenceColor * 0.1;
-        }
-
-        return true;
-    }
-    else if (mat.type == 7) {
-        // Green Marble - polished with glossy coat
-        vec3 p = rec.point * mat.param;
-
-        // Green variation: use FBM for organic dark/mid green patches
-        float greenNoise = fbm(p * 0.8, 5);
-        float greenVar = smoothstep(-0.3, 0.5, greenNoise);
-
-        vec3 darkGreen = mat.albedo * 0.3;
-        vec3 midGreen = mat.albedo;
-        vec3 veinColor = mat.emission;
-
-        vec3 baseColor = mix(darkGreen, midGreen, greenVar);
-
-        // White quartz inclusions
-        float plasma = fbm(p * 0.5, 6);
-        float center = 0.1;
-        float width = 0.025;
-        float quartzAmt = 1.0 - smoothstep(0.0, width, abs(plasma - center));
-        quartzAmt = pow(quartzAmt, 1.5);
-
-        vec3 diffuseColor = mix(baseColor, veinColor, quartzAmt);
-
-        // Polished surface: Fresnel-weighted specular vs diffuse
-        float cosTheta = abs(dot(normalize(-rIn.direction), rec.normal));
-        float fresnel = 0.04 + 0.96 * pow(1.0 - cosTheta, 5.0);  // Schlick approximation
-
-        // Randomly choose specular or diffuse based on Fresnel
-        if (rand() < fresnel) {
-            // Specular reflection (glossy)
-            vec3 reflected = reflect(normalize(rIn.direction), rec.normal);
-            reflected += 0.03 * randomInUnitSphere();  // slight roughness for polished look
-            scattered = Ray(rec.point, normalize(reflected));
-            attenuation = vec3(1.0);  // pure reflection
-        } else {
-            // Diffuse scatter with marble color
-            vec3 scatterDir = rec.normal + randomUnitVector();
-            if (dot(scatterDir, scatterDir) < EPSILON)
-                scatterDir = rec.normal;
-            scattered = Ray(rec.point, normalize(scatterDir));
-            attenuation = diffuseColor;
-        }
-        return true;
-    }
-    else if (mat.type == 8) {
-        // Wood - polished/lacquered with glossy coat
-        vec3 noisePos = rec.point * mat.param;
-
-        // Distance from Y axis creates rings
-        float dist = length(noisePos.xz);
-
-        // Add noise to perturb the rings
-        float noise = gradientNoise(noisePos * 0.5) * 1.5;
-        noise += gradientNoise(noisePos * 1.0) * 0.5;
-
-        float ring = fract((dist + noise) * 1.0);
-        float t = pow(ring, 0.5);
-
-        // Fine grain streaks
-        float grain = gradientNoise(vec3(noisePos.x * 0.5, noisePos.y * 8.0, noisePos.z * 0.5));
-        t = clamp(t + grain * 0.15, 0.0, 1.0);
-
-        vec3 diffuseColor = mix(mat.emission, mat.albedo, t);
-
-        // Polished/lacquered surface: Fresnel-weighted specular
-        float cosTheta = abs(dot(normalize(-rIn.direction), rec.normal));
-        float fresnel = 0.04 + 0.96 * pow(1.0 - cosTheta, 5.0);
-
-        if (rand() < fresnel) {
-            vec3 reflected = reflect(normalize(rIn.direction), rec.normal);
-            reflected += 0.02 * randomInUnitSphere();  // very smooth lacquer
-            scattered = Ray(rec.point, normalize(reflected));
-            attenuation = vec3(1.0);
-        } else {
-            vec3 scatterDir = rec.normal + randomUnitVector();
-            if (dot(scatterDir, scatterDir) < EPSILON)
-                scatterDir = rec.normal;
-            scattered = Ray(rec.point, normalize(scatterDir));
-            attenuation = diffuseColor;
-        }
-        return true;
-    }
-    else if (mat.type == 9) {
-        // Swirl - polished with glossy coat
-        vec3 noisePos = rec.point * mat.param;
-
-        // Domain warping for interesting swirls
-        vec3 warp = vec3(
-            fbm(noisePos, 4),
-            fbm(noisePos + vec3(5.2, 1.3, 2.8), 4),
-            fbm(noisePos + vec3(1.7, 9.2, 3.1), 4)
-        );
-        float n = fbm(noisePos + warp * 2.0, 4);
-        float t = 0.5 + 0.5 * n;
-
-        vec3 diffuseColor = mix(mat.albedo, mat.emission, t);
-
-        // Polished surface: Fresnel-weighted specular
-        float cosTheta = abs(dot(normalize(-rIn.direction), rec.normal));
-        float fresnel = 0.04 + 0.96 * pow(1.0 - cosTheta, 5.0);
-
-        if (rand() < fresnel) {
-            vec3 reflected = reflect(normalize(rIn.direction), rec.normal);
-            reflected += 0.03 * randomInUnitSphere();
-            scattered = Ray(rec.point, normalize(reflected));
-            attenuation = vec3(1.0);
-        } else {
-            vec3 scatterDir = rec.normal + randomUnitVector();
-            if (dot(scatterDir, scatterDir) < EPSILON)
-                scatterDir = rec.normal;
-            scattered = Ray(rec.point, normalize(scatterDir));
-            attenuation = diffuseColor;
-        }
-        return true;
-    }
-    else if (mat.type == 10) {
-        // Checker pattern - polished floor
-        vec3 p = rec.point * mat.param;
-
-        // Use fract() based checker - more numerically stable than floor()
-        // This avoids precision issues at integer boundaries
-        float fx = fract(p.x * 0.5) * 2.0;  // 0 to 2, wraps every 2 units
-        float fy = fract(p.y * 0.5) * 2.0;
-        float fz = fract(p.z * 0.5) * 2.0;
-
-        // XOR-style checker: each axis flips when crossing 1.0
-        bool flipX = fx >= 1.0;
-        bool flipY = fy >= 1.0;
-        bool flipZ = fz >= 1.0;
-        bool isEven = (flipX ^^ flipY ^^ flipZ);
-
-        vec3 diffuseColor = isEven ? mat.albedo : mat.emission;
-
-        // Polished floor: Fresnel-weighted specular
-        float cosTheta = abs(dot(normalize(-rIn.direction), rec.normal));
-        float fresnel = 0.04 + 0.96 * pow(1.0 - cosTheta, 5.0);
-
-        if (rand() < fresnel) {
-            vec3 reflected = reflect(normalize(rIn.direction), rec.normal);
-            reflected += 0.02 * randomInUnitSphere();  // slightly rougher
-            // Offset origin along normal to prevent self-intersection
-            vec3 offsetOrigin = rec.point + rec.normal * 0.001;
-            scattered = Ray(offsetOrigin, normalize(reflected));
-            // Absorption: reflections lose energy, slight tint from floor color
-            attenuation = vec3(0.75) * mix(vec3(1.0), diffuseColor, 0.15);
-        } else {
-            vec3 scatterDir = rec.normal + randomUnitVector();
-            if (dot(scatterDir, scatterDir) < EPSILON)
-                scatterDir = rec.normal;
-            vec3 offsetOrigin = rec.point + rec.normal * 0.001;
-            scattered = Ray(offsetOrigin, normalize(scatterDir));
-            attenuation = diffuseColor;
-        }
-        return true;
-    }
-
-    return false;
-}
-
-// Light sampling for NEE (Next Event Estimation)
-// Returns light position and emission for the emissive sphere
-void sampleLight(out vec3 lightPos, out vec3 lightEmission, out float lightRadius, out uint lightCount) {
-    // Count emissive spheres and randomly select one
-    uint lightIndices[8];  // max 8 lights
-    lightCount = 0u;
-
-    for (uint i = 0; i < pc.sphereCount && lightCount < 8u; i++) {
-        Material mat = materials[spheres[i].materialId];
-        if (mat.type == 3) {
-            lightIndices[lightCount] = i;
-            lightCount++;
-        }
-    }
-
-    if (lightCount == 0u) {
-        // Fallback
-        lightPos = vec3(0, 8, 0);
-        lightRadius = 1.0;
-        lightEmission = vec3(15.0);
-        lightCount = 1u;
-        return;
-    }
-
-    // Randomly select one light
-    uint selected = uint(rand() * float(lightCount)) % lightCount;
-    uint idx = lightIndices[selected];
-
-    lightPos = spheres[idx].center;
-    lightRadius = spheres[idx].radius;
-    lightEmission = materials[spheres[idx].materialId].emission;
-}
-
-// Sample random point on sphere surface
-vec3 sampleSpherePoint(vec3 center, float radius) {
-    vec3 dir = randomUnitVector();
-    return center + dir * radius;
-}
-
-// Check if ray hits anything before maxDist
-bool shadowRay(vec3 origin, vec3 dir, float maxDist) {
-    Ray ray = Ray(origin, dir);
-    HitRecord rec;
-    if (hitScene(ray, EPSILON, maxDist - EPSILON, rec)) {
-        // Hit something - but is it the light itself?
-        Material mat = materials[rec.materialId];
-        if (mat.type == 3) return false; // Hit the light, not shadowed
-        return true; // Hit something else, shadowed
-    }
-    return false; // Nothing hit, light is visible
-}
-
-// ============ SPOTLIGHT FUNCTIONS ============
-
-// Evaluate gobo pattern at a 2D coordinate
-// Returns 0.0 (blocked) to 1.0 (full light)
-float evaluateGobo(uint goboType, vec2 uv, float scale, float rotation) {
-    // Apply rotation
-    float c = cos(rotation);
-    float s = sin(rotation);
-    vec2 ruv = vec2(c * uv.x - s * uv.y, s * uv.x + c * uv.y);
-    ruv *= scale;
-
-    if (goboType == 0u) {
-        // No gobo - full light
-        return 1.0;
-    } else if (goboType == 1u) {
-        // Stripes - vertical bars
-        return step(0.5, fract(ruv.x));
-    } else if (goboType == 2u) {
-        // Grid - window pattern
-        float bars = step(0.3, fract(ruv.x)) * step(0.3, fract(ruv.y));
-        return bars;
-    } else if (goboType == 3u) {
-        // Circles - concentric rings
-        float r = length(ruv);
-        return step(0.5, fract(r));
-    } else if (goboType == 4u) {
-        // Dots - array of circles
-        vec2 cell = fract(ruv) - 0.5;
-        return 1.0 - smoothstep(0.2, 0.25, length(cell));
-    } else if (goboType == 5u) {
-        // Star - radial burst pattern
-        float angle = atan(ruv.y, ruv.x);
-        float rays = abs(sin(angle * 6.0));
-        float r = length(ruv);
-        return smoothstep(0.0, 0.5, rays) * smoothstep(2.0, 0.0, r);
-    } else if (goboType == 6u) {
-        // Off - light completely disabled
-        return 0.0;
-    }
-    return 1.0;
-}
-
-// Evaluate spotlight contribution at a given point
-// Returns the light color/intensity multiplied by cone falloff and gobo pattern
-vec3 evaluateSpotLight(SpotLight light, vec3 point, vec3 normal, out vec3 lightDir, out float distance) {
-    vec3 toLight = light.position - point;
-    distance = length(toLight);
-    lightDir = toLight / distance;
-
-    // Check if point is in front of the spotlight
-    float cosAngle = dot(-lightDir, light.direction);
-    if (cosAngle <= cos(light.outerAngle)) {
-        return vec3(0.0);  // Outside outer cone
-    }
-
-    // Cone falloff - smooth transition from inner to outer
-    float cosInner = cos(light.innerAngle);
-    float cosOuter = cos(light.outerAngle);
-    float spotFalloff = smoothstep(cosOuter, cosInner, cosAngle);
-
-    // Distance attenuation (inverse square law)
-    float attenuation = 1.0 / (distance * distance);
-
-    // Compute UV for gobo pattern
-    // Project point onto plane perpendicular to light direction
-    vec3 lightRight, lightUp;
-    if (abs(light.direction.y) < 0.99) {
-        lightRight = normalize(cross(light.direction, vec3(0, 1, 0)));
-    } else {
-        lightRight = normalize(cross(light.direction, vec3(1, 0, 0)));
-    }
-    lightUp = cross(light.direction, lightRight);
-
-    // Project the light-to-point vector onto the plane
-    vec3 toPointLocal = -toLight;
-    vec2 goboUV = vec2(dot(toPointLocal, lightRight), dot(toPointLocal, lightUp));
-    // Normalize by distance to get angular coordinates
-    goboUV /= distance;
-
-    float goboMask = evaluateGobo(light.goboType, goboUV, light.goboScale, light.goboRotation);
-
-    return light.color * spotFalloff * attenuation * goboMask;
-}
-
-// Path tracing with Next Event Estimation
 vec3 tracePath(Ray ray) {
     vec3 radiance = vec3(0.0);
     vec3 throughput = vec3(1.0);
-    bool lastBounceSpecular = true;  // Camera ray counts as "specular" for emission
+    bool lastBounceSpecular = true;
 
-    // Light sampling variables (resampled each NEE)
     vec3 lightPos, lightEmission;
     float lightRadius;
     uint lightCount;
@@ -884,107 +135,78 @@ vec3 tracePath(Ray ray) {
         if (!hitScene(ray, EPSILON, T_MAX, rec)) {
             vec3 unitDir = normalize(ray.direction);
 
-            // Sun direction from elevation and azimuth angles
+            // Sun direction from elevation and azimuth
             float cosElev = cos(pc.sunElevation);
             float sinElev = sin(pc.sunElevation);
             vec3 sunDir = vec3(cosElev * sin(pc.sunAzimuth), sinElev, cosElev * cos(pc.sunAzimuth));
-            float sunAngularRadius = 0.02;  // ~1 degree angular radius
-            vec3 sunColor = vec3(50.0, 47.0, 40.0);  // bright warm sun
+            float sunAngularRadius = 0.02;
+            vec3 sunColor = vec3(50.0, 47.0, 40.0);
 
             vec3 envLight;
+            vec3 betaR = vec3(0.18, 0.41, 1.0);  // Rayleigh scattering
 
-            // Rayleigh scattering coefficients (wavelength^-4 dependence)
-            vec3 betaR = vec3(0.18, 0.41, 1.0);
-
-            // Sun altitude determines overall light level
-            // Twilight zones: civil (0 to -6°), nautical (-6 to -12°), astronomical (-12 to -18°)
-            float sunAlt = sunDir.y;  // sin of sun elevation angle
-
-            // Daylight factor: 1.0 at day, fades through twilight to 0 at night
-            // Civil twilight ends at sin(-6°) ≈ -0.1
-            // Astronomical twilight ends at sin(-18°) ≈ -0.31
+            float sunAlt = sunDir.y;
             float daylight = smoothstep(-0.31, 0.0, sunAlt);
-
-            // Twilight glow factor (peaks during civil/nautical twilight)
             float twilight = smoothstep(-0.31, -0.1, sunAlt) * smoothstep(0.1, -0.05, sunAlt);
 
             if (unitDir.y > 0.0) {
-                // === Sun's light after passing through atmosphere ===
+                // Sky above horizon
                 float sunOpticalDepth;
                 if (sunAlt > 0.0) {
-                    // Sun above horizon
                     sunOpticalDepth = 1.0 / (sunAlt + 0.15);
                 } else {
-                    // Sun below horizon - light only reaches upper atmosphere
-                    // Very long path through atmosphere
                     sunOpticalDepth = 8.0 + abs(sunAlt) * 20.0;
                 }
                 sunOpticalDepth = min(sunOpticalDepth, 15.0);
 
-                // Transmittance: how much of each wavelength survives
                 vec3 sunTransmit = exp(-betaR * sunOpticalDepth * 0.5);
-
                 vec3 incomingSunLight = sunTransmit * daylight * 1.5;
 
-                // === Sky color from Rayleigh scattering ===
                 float viewAltitude = max(unitDir.y, 0.001);
                 float viewOpticalDepth = exp(-viewAltitude * 4.0) / viewAltitude;
                 viewOpticalDepth = min(viewOpticalDepth, 40.0);
 
-                // Rayleigh phase function: 3/4 * (1 + cos²θ)
                 float cosAngle = dot(unitDir, sunDir);
                 float phase = 0.75 * (1.0 + cosAngle * cosAngle);
 
-                // Scattered light = incoming * scatter_amount * phase
                 vec3 scatter = (vec3(1.0) - exp(-betaR * viewOpticalDepth * 0.4)) * phase;
                 vec3 skyColor = scatter * incomingSunLight;
 
-                // === Mie scattering (haze/glow around sun) ===
                 float sunProximity = max(0.0, cosAngle);
                 float miePhase = pow(sunProximity, 4.0);
                 float mieGlow = pow(sunProximity, 32.0);
                 vec3 mieColor = incomingSunLight * (miePhase * 0.3 + mieGlow * 2.0);
 
-                // === Twilight glow near horizon ===
-                // Orange/pink glow during civil twilight, concentrated at horizon
-                float horizonGlow = exp(-viewAltitude * 8.0);  // strongest at horizon
+                float horizonGlow = exp(-viewAltitude * 8.0);
                 vec3 twilightColor = vec3(0.8, 0.3, 0.1) * twilight * horizonGlow * 0.5;
 
-                // === Night sky ===
-                // Dark blue/black with slight gradient
                 vec3 nightSky = vec3(0.001, 0.002, 0.008) * (1.0 + viewAltitude * 0.5);
 
-                // Simple stars (when dark enough)
+                // Stars
                 float starVisibility = (1.0 - daylight) * (1.0 - twilight * 2.0);
                 if (starVisibility > 0.3) {
-                    // Hash-based stars
                     vec3 starPos = floor(unitDir * 500.0);
                     float starHash = fract(sin(dot(starPos, vec3(12.9898, 78.233, 45.164))) * 43758.5453);
-                    if (starHash > 0.997) {  // ~0.3% of sky cells have stars
+                    if (starHash > 0.997) {
                         float starBright = pow(starHash - 0.997, 0.5) * 30.0;
-                        // Twinkle
                         float twinkle = 0.7 + 0.3 * sin(float(pc.frameIndex) * 0.1 + starHash * 100.0);
                         nightSky += vec3(starBright * twinkle * starVisibility);
                     }
                 }
 
-                // === Combine ===
                 envLight = skyColor + mieColor + twilightColor + nightSky * (1.0 - daylight);
 
-                // Check if ray hits the sun disc (only when above horizon)
+                // Sun disc
                 float sunThreshold = cos(sunAngularRadius);
                 if (sunAlt > -0.02 && cosAngle > sunThreshold) {
-                    // Sun disc - use transmitted color (orange at sunset)
                     vec3 discColor = sunTransmit * sunColor;
                     float sampleFactor = clamp(float(pc.frameIndex) / 200.0, 0.0, 1.0);
                     float maxSun = mix(1.5, 50.0, sampleFactor * sampleFactor);
                     envLight = min(discColor * daylight, vec3(maxSun));
                 }
             } else {
-                // Below horizon - ocean/ground
+                // Below horizon (ocean)
                 float depth = -unitDir.y;
-
-                // Get horizon color based on time of day
                 float sunOpticalDepth;
                 if (sunAlt > 0.0) {
                     sunOpticalDepth = 1.0 / (sunAlt + 0.15);
@@ -993,7 +215,6 @@ vec3 tracePath(Ray ray) {
                 }
                 vec3 sunTransmit = exp(-betaR * min(sunOpticalDepth, 15.0) * 0.5);
 
-                // Ocean color modulated by daylight
                 vec3 horizonOcean = vec3(0.08, 0.15, 0.25) * sunTransmit * daylight;
                 vec3 twilightOcean = vec3(0.03, 0.02, 0.04) * twilight;
                 vec3 nightOcean = vec3(0.001, 0.002, 0.005);
@@ -1008,34 +229,25 @@ vec3 tracePath(Ray ray) {
 
         Material mat = materials[rec.materialId];
 
-        // Add emission when we hit a light (type 3 only)
-        // Other materials use emission field for secondary color (procedural textures)
-        // With NEE: only count if we came from a specular bounce (glass/metal)
-        // because NEE only samples for diffuse, specular paths need to find light naturally
+        // Emission (for emissive surfaces)
         if (mat.type == 3 && (lastBounceSpecular || pc.useNEE == 0)) {
-            radiance += min(throughput * mat.emission, vec3(50.0));  // firefly clamp
+            radiance += min(throughput * mat.emission, vec3(50.0));
         }
 
-        // NEE: Sample the sky sun for diffuse surfaces (only when sun is up)
+        // NEE: Sample sun for diffuse surfaces
         if (pc.useNEE == 1 && mat.type == 0) {
-            // Sun direction from elevation and azimuth (must match sky code)
             float cosElev = cos(pc.sunElevation);
             float sinElev = sin(pc.sunElevation);
             vec3 sunDir = vec3(cosElev * sin(pc.sunAzimuth), sinElev, cosElev * cos(pc.sunAzimuth));
 
-            // Only sample sun if it's above horizon
-            // At civil twilight (sin ~-0.1), there's still some indirect light but no direct sun
             if (sunDir.y > 0.0) {
                 float sunAngularRadius = 0.02;
                 vec3 sunColor = vec3(50.0, 47.0, 40.0);
 
-                // Attenuate sun based on altitude (atmospheric absorption)
                 vec3 betaR = vec3(0.18, 0.41, 1.0);
-                float sunOpticalDepth = 1.0 / (sunDir.y + 0.15);
-                sunOpticalDepth = min(sunOpticalDepth, 8.0);
+                float sunOpticalDepth = min(1.0 / (sunDir.y + 0.15), 8.0);
                 vec3 sunTransmit = exp(-betaR * sunOpticalDepth * 0.5);
 
-                // Sample a direction within the sun disc (cone sampling)
                 vec3 u, v;
                 if (abs(sunDir.y) < 0.99) {
                     u = normalize(cross(sunDir, vec3(0, 1, 0)));
@@ -1051,21 +263,14 @@ vec3 tracePath(Ray ray) {
                 vec3 lightDir = normalize(sunDir + theta * (cos(phi) * u + sin(phi) * v));
 
                 float NdotL = dot(rec.normal, lightDir);
-
-                // Offset shadow ray origin
                 vec3 shadowOrigin = rec.point + rec.normal * 0.001;
+
                 if (NdotL > 0.0 && !shadowRay(shadowOrigin, lightDir, T_MAX)) {
-                    // Solid angle of sun disc
                     float solidAngle = PI * sunAngularRadius * sunAngularRadius;
-
-                    // BRDF for diffuse = albedo / PI
                     vec3 brdf = mat.albedo / PI;
-
-                    // Apply sun transmittance to color
                     vec3 attenuatedSunColor = sunColor * sunTransmit;
                     vec3 directLight = throughput * brdf * attenuatedSunColor * NdotL * solidAngle;
 
-                    // Frame-based firefly clamp - aggressive early, relaxes over time
                     float neeFactor = clamp(float(pc.frameIndex) / 200.0, 0.0, 1.0);
                     float neeClamp = mix(2.0, 50.0, neeFactor * neeFactor);
                     radiance += min(directLight, vec3(neeClamp));
@@ -1077,24 +282,18 @@ vec3 tracePath(Ray ray) {
         if (pc.useNEE == 1 && mat.type == 0 && pc.spotLightCount > 0u) {
             for (uint i = 0u; i < pc.spotLightCount; i++) {
                 SpotLight light = spotLights[i];
-
                 vec3 lightDir;
                 float lightDist;
                 vec3 lightContrib = evaluateSpotLight(light, rec.point, rec.normal, lightDir, lightDist);
 
                 if (length(lightContrib) > 0.0) {
                     float NdotL = dot(rec.normal, lightDir);
-
                     if (NdotL > 0.0) {
-                        // Shadow ray to spotlight
                         vec3 shadowOrigin = rec.point + rec.normal * 0.001;
                         if (!shadowRay(shadowOrigin, lightDir, lightDist)) {
-                            // BRDF for diffuse = albedo / PI
                             vec3 brdf = mat.albedo / PI;
-
                             vec3 directLight = throughput * brdf * lightContrib * NdotL;
 
-                            // Frame-based firefly clamp
                             float neeFactor = clamp(float(pc.frameIndex) / 200.0, 0.0, 1.0);
                             float neeClamp = mix(2.0, 50.0, neeFactor * neeFactor);
                             radiance += min(directLight, vec3(neeClamp));
@@ -1104,18 +303,16 @@ vec3 tracePath(Ray ray) {
             }
         }
 
-        // Scatter for indirect
+        // Scatter
         vec3 attenuation;
         Ray scattered;
         if (!scatter(ray, rec, attenuation, scattered)) {
             break;
         }
 
-        // Track if this bounce was specular (metal=1, dielectric=2)
-        lastBounceSpecular = (mat.type == 1 || mat.type == 2);
-
         throughput *= attenuation;
         ray = scattered;
+        lastBounceSpecular = (mat.type == 1 || mat.type == 2 || mat.type == 4 || mat.type == 6);
 
         // Russian roulette termination
         if (bounce > 3) {
@@ -1128,7 +325,8 @@ vec3 tracePath(Ray ray) {
     return radiance;
 }
 
-// Generate camera ray
+// ============ CAMERA & MAIN ============
+
 Ray getCameraRay(vec2 uv) {
     vec3 direction = camera.lowerLeftCorner
                    + uv.x * camera.horizontal
@@ -1145,21 +343,16 @@ void main() {
 
     initRNG(uvec2(pixel), pc.frameIndex);
 
-    // Use full sample budget always - accumulation handles convergence,
-    // and reducing samples causes specular features (sun reflections, caustics) to fade
     uint samples = pc.sampleCount;
 
     vec3 color = vec3(0.0);
     for (uint s = 0; s < samples; s++) {
-        // Jittered sample within pixel
-        // Flip Y for Vulkan coordinate system (Y=0 at top)
         vec2 uv = (vec2(pixel) + rand2()) / vec2(pc.width, pc.height);
         uv.y = 1.0 - uv.y;
 
         Ray ray = getCameraRay(uv);
         vec3 sampleColor = tracePath(ray);
 
-        // Clamp per sample to prevent fireflies
         if (any(isnan(sampleColor)) || any(isinf(sampleColor))) {
             sampleColor = vec3(0.0);
         }
@@ -1169,29 +362,22 @@ void main() {
     }
     color /= float(samples);
 
-    // Hybrid accumulation:
-    // - Moving (accumulate=0): Just current frame (no blur from old camera positions)
-    // - Stationary (accumulate=1): Proper progressive accumulation
+    // Hybrid accumulation
     vec4 prev = imageLoad(accumImage, pixel);
     vec3 blended;
 
     if (pc.accumulate == 0) {
-        // Moving: blend with just the previous frame (2-frame average)
         blended = mix(prev.rgb, color, 0.5);
     } else {
-        // Progressive accumulation, but cap frame count so new samples
-        // always contribute at least ~3% (prevents locking in early errors)
         uint cappedFrame = min(pc.frameIndex, 32u);
         float weight = 1.0 / float(cappedFrame + 1);
         blended = mix(prev.rgb, color, weight);
     }
     imageStore(accumImage, pixel, vec4(blended, 1.0));
 
-    // Apply spatial denoise filter during movement
+    // Bilateral filter during movement
     vec3 filtered = blended;
     if (pc.accumulate == 0) {
-        // Edge-aware bilateral filter (3x3)
-        // Weights based on spatial distance and color similarity
         const float sigmaSpatial = 1.0;
         const float sigmaColor = 0.1;
 
@@ -1202,17 +388,14 @@ void main() {
             for (int dx = -1; dx <= 1; dx++) {
                 ivec2 samplePos = pixel + ivec2(dx, dy);
 
-                // Bounds check
                 if (samplePos.x >= 0 && samplePos.x < int(pc.width) &&
                     samplePos.y >= 0 && samplePos.y < int(pc.height)) {
 
                     vec3 sampleColor = imageLoad(accumImage, samplePos).rgb;
 
-                    // Spatial weight (Gaussian)
                     float spatialDist = float(dx * dx + dy * dy);
                     float spatialWeight = exp(-spatialDist / (2.0 * sigmaSpatial * sigmaSpatial));
 
-                    // Color weight (edge-preserving)
                     vec3 colorDiff = sampleColor - blended;
                     float colorDist = dot(colorDiff, colorDiff);
                     float colorWeight = exp(-colorDist / (2.0 * sigmaColor * sigmaColor));
@@ -1227,11 +410,7 @@ void main() {
         filtered = sum / max(weightSum, 0.0001);
     }
 
-    // No tonemapping - just clamp and gamma correct
-    // Preserves saturation better for vibrant sky colors
     vec3 finalColor = clamp(filtered, vec3(0.0), vec3(1.0));
-
-    // Gamma correction
     finalColor = pow(finalColor, vec3(1.0 / 2.2));
 
     imageStore(outputImage, pixel, vec4(finalColor, 1.0));
