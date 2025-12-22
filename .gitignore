@@ -1,4 +1,5 @@
 build/
 *.png
+!docs/media/*.png
 .cache/
 compile_commands.json
