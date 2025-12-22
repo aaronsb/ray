@@ -2,6 +2,11 @@
 
 #include <vector>
 #include <cstdint>
+#include <QString>
+#include <QFile>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
 #include "types.h"
 #include "camera.h"
 #include "materials.h"
@@ -89,6 +94,156 @@ public:
     uint32_t boxCount() const { return static_cast<uint32_t>(m_boxes.size()); }
     uint32_t spotLightCount() const { return static_cast<uint32_t>(m_spotLights.size()); }
     uint32_t materialCount() const { return static_cast<uint32_t>(m_materials.size()); }
+
+    // === SERIALIZATION ===
+
+    bool save(const QString& path) const {
+        QJsonObject root;
+        root["version"] = 1;
+
+        // Materials
+        QJsonArray materialsArray;
+        for (const auto& mat : m_materials) {
+            QJsonObject m;
+            m["type"] = static_cast<int>(mat.type);
+            m["albedo"] = vec3ToJson(mat.albedo);
+            m["emission"] = vec3ToJson(mat.emission);
+            m["param"] = mat.param;
+            m["param2"] = mat.param2;
+            materialsArray.append(m);
+        }
+        root["materials"] = materialsArray;
+
+        // Spheres
+        QJsonArray spheresArray;
+        for (const auto& s : m_spheres) {
+            QJsonObject obj;
+            obj["center"] = vec3ToJson(s.center);
+            obj["radius"] = s.radius;
+            obj["materialId"] = static_cast<int>(s.materialId);
+            spheresArray.append(obj);
+        }
+        root["spheres"] = spheresArray;
+
+        // Boxes
+        QJsonArray boxesArray;
+        for (const auto& b : m_boxes) {
+            QJsonObject obj;
+            obj["center"] = vec3ToJson(b.center);
+            obj["halfExtents"] = vec3ToJson(b.halfExtents);
+            obj["materialId"] = static_cast<int>(b.materialId);
+            boxesArray.append(obj);
+        }
+        root["boxes"] = boxesArray;
+
+        // Spotlights
+        QJsonArray lightsArray;
+        for (const auto& l : m_spotLights) {
+            QJsonObject obj;
+            obj["position"] = vec3ToJson(l.position);
+            obj["direction"] = vec3ToJson(l.direction);
+            obj["color"] = vec3ToJson(l.color);
+            obj["innerAngle"] = l.innerAngle;
+            obj["outerAngle"] = l.outerAngle;
+            obj["goboType"] = static_cast<int>(l.goboType);
+            obj["goboScale"] = l.goboScale;
+            obj["goboRotation"] = l.goboRotation;
+            lightsArray.append(obj);
+        }
+        root["spotLights"] = lightsArray;
+
+        QFile file(path);
+        if (!file.open(QIODevice::WriteOnly)) {
+            return false;
+        }
+        file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+        return true;
+    }
+
+    bool load(const QString& path) {
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly)) {
+            return false;
+        }
+
+        QJsonParseError error;
+        QJsonDocument doc = QJsonDocument::fromJson(file.readAll(), &error);
+        if (error.error != QJsonParseError::NoError) {
+            return false;
+        }
+
+        QJsonObject root = doc.object();
+
+        // Clear existing data
+        clear();
+
+        // Materials
+        for (const auto& val : root["materials"].toArray()) {
+            QJsonObject m = val.toObject();
+            Material mat;
+            mat.type = static_cast<uint32_t>(m["type"].toInt());
+            mat.albedo = jsonToVec3(m["albedo"].toArray());
+            mat.emission = jsonToVec3(m["emission"].toArray());
+            mat.param = static_cast<float>(m["param"].toDouble());
+            mat.param2 = static_cast<float>(m["param2"].toDouble());
+            mat._pad = 0;
+            m_materials.push_back(mat);
+        }
+
+        // Spheres
+        for (const auto& val : root["spheres"].toArray()) {
+            QJsonObject s = val.toObject();
+            Sphere sphere;
+            sphere.center = jsonToVec3(s["center"].toArray());
+            sphere.radius = static_cast<float>(s["radius"].toDouble());
+            sphere.materialId = static_cast<uint32_t>(s["materialId"].toInt());
+            sphere._pad[0] = sphere._pad[1] = 0;
+            m_spheres.push_back(sphere);
+        }
+
+        // Boxes
+        for (const auto& val : root["boxes"].toArray()) {
+            QJsonObject b = val.toObject();
+            Box box;
+            box.center = jsonToVec3(b["center"].toArray());
+            box.halfExtents = jsonToVec3(b["halfExtents"].toArray());
+            box.materialId = static_cast<uint32_t>(b["materialId"].toInt());
+            box._pad[0] = box._pad[1] = box._pad[2] = 0;
+            m_boxes.push_back(box);
+        }
+
+        // Spotlights
+        for (const auto& val : root["spotLights"].toArray()) {
+            QJsonObject l = val.toObject();
+            SpotLight light;
+            light.position = jsonToVec3(l["position"].toArray());
+            light.direction = jsonToVec3(l["direction"].toArray());
+            light.color = jsonToVec3(l["color"].toArray());
+            light.innerAngle = static_cast<float>(l["innerAngle"].toDouble());
+            light.outerAngle = static_cast<float>(l["outerAngle"].toDouble());
+            light.goboType = static_cast<uint32_t>(l["goboType"].toInt());
+            light.goboScale = static_cast<float>(l["goboScale"].toDouble());
+            light.goboRotation = static_cast<float>(l["goboRotation"].toDouble());
+            light._pad[0] = light._pad[1] = light._pad[2] = 0;
+            m_spotLights.push_back(light);
+        }
+
+        return true;
+    }
+
+private:
+    // JSON helpers
+    static QJsonArray vec3ToJson(const Vec3& v) {
+        return QJsonArray{v.x, v.y, v.z};
+    }
+
+    static Vec3 jsonToVec3(const QJsonArray& arr) {
+        return Vec3{
+            static_cast<float>(arr[0].toDouble()),
+            static_cast<float>(arr[1].toDouble()),
+            static_cast<float>(arr[2].toDouble())
+        };
+    }
 
 private:
     std::vector<Sphere> m_spheres;
