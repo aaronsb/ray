@@ -1,4 +1,4 @@
-# ADR-001: Modular Architecture Refactoring
+# ADR-003: Modular Architecture Refactoring
 
 Status: Proposed
 Date: 2025-12-21
@@ -19,20 +19,20 @@ Currently, most code lives in:
 - `raytrace.comp` - all shader logic (1100+ lines)
 
 This works but makes it hard to:
-- Add new geometry types (meshes, triangles)
-- Add new material types without touching multiple files
+- Add new features without touching multiple files
 - Save/load scenes
 - Test components in isolation
+- Reason about dependencies
 
 ## Decision
 
-Refactor into a modular architecture with clear separation of concerns:
+Refactor into a modular architecture with clear separation of concerns.
 
 ### Core Modules
 
 | Module | Files | Responsibility |
 |--------|-------|----------------|
-| **Geometry** | `geometry.h/.cpp` | Base class + Sphere, Box, future Mesh/BVH |
+| **Geometry** | `geometry.h/.cpp` | Base class, intersection dispatch, AABB |
 | **Materials** | `materials.h/.cpp` | Material types, procedural textures |
 | **Lights** | `lights.h/.cpp` | Sun, SpotLight, future area lights |
 | **Scene** | `scene.h/.cpp` | Object collection, serialization |
@@ -51,10 +51,23 @@ shaders/
     random.glsl          # RNG functions
     noise.glsl           # Perlin, FBM, Worley
     materials.glsl       # material evaluation
-    geometry.glsl        # intersection tests
+    geometry.glsl        # intersection tests (see ADR-004)
     lights.glsl          # light sampling, gobos
     sky.glsl             # atmosphere, stars
-    bvh.glsl             # future: acceleration structure
+```
+
+### Scene API
+
+```cpp
+Scene scene;
+scene.add<Sphere>(center, radius, materialId);
+scene.add<Box>(center, halfExtents, materialId);
+scene.setMaterial(id, Material{...});
+scene.addLight<SpotLight>(...);
+
+// Serialization
+scene.save("scene.json");
+scene.load("scene.json");
 ```
 
 ### Geometry Abstraction
@@ -67,31 +80,14 @@ public:
     virtual AABB bounds() const = 0;
     virtual void upload(VkBuffer& buffer, VkDeviceMemory& memory) = 0;
 };
-
-class Sphere : public Geometry { ... };
-class Box : public Geometry { ... };
-class TriangleMesh : public Geometry { ... };  // future
 ```
 
-### Scene API
-
-```cpp
-Scene scene;
-scene.add<Sphere>(center, radius, materialId);
-scene.add<Box>(center, halfExtents, materialId);
-scene.add<Mesh>(Mesh::loadOBJ("bunny.obj"), materialId);  // future
-scene.setMaterial(id, Material{...});
-scene.addLight<SpotLight>(...);
-
-// Serialization
-scene.save("scene.json");
-scene.load("scene.json");
-```
+Concrete geometry types are defined in ADR-004.
 
 ## Consequences
 
 ### Positive
-- Easier to add new geometry types (meshes, CSG)
+- Easier to add new geometry types (see ADR-004)
 - Easier to add new materials without monolithic changes
 - Scene save/load enables sharing and iteration
 - Testable components
@@ -105,7 +101,6 @@ scene.load("scene.json");
 
 ### Neutral
 - Will need to decide on serialization format (JSON, binary, custom)
-- BVH implementation is a separate significant effort
 
 ## Alternatives Considered
 
@@ -117,12 +112,16 @@ scene.load("scene.json");
 
 1. Create branch `refactor/modular-architecture`
 2. Extract Camera (already fairly isolated)
-3. Extract Materials and Geometry structs
+3. Extract Materials structs
 4. Extract Lights
-5. Create Scene container with add/remove API
-6. Split shader into includes
-7. Add basic JSON serialization
-8. (Future) Add Mesh/BVH support
+5. Create Geometry base class (primitives per ADR-004)
+6. Create Scene container with add/remove API
+7. Split shader into includes
+8. Add basic JSON serialization
+
+## Related
+
+- ADR-004: Geometry Primitives
 
 ## Open Questions
 
