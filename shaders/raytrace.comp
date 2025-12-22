@@ -322,7 +322,14 @@ bool hitGroundPlane(Ray r, float tMin, float tMax, inout HitRecord rec, uint mat
     float t = -r.origin.y / r.direction.y;
     if (t < tMin || t > tMax) return false;
 
-    vec3 hitPoint = rayAt(r, t);
+    // Compute hit point with better precision for y=0 plane
+    // Instead of origin + t * direction (which loses precision for large t),
+    // compute x,z directly using similar triangles
+    float invDirY = 1.0 / r.direction.y;
+    vec3 hitPoint;
+    hitPoint.x = r.origin.x - r.origin.y * r.direction.x * invDirY;
+    hitPoint.y = 0.0;  // Exactly on the plane
+    hitPoint.z = r.origin.z - r.origin.y * r.direction.z * invDirY;
 
     // Bound the plane to a reasonable size (50 unit radius)
     float distFromOrigin = length(hitPoint.xz);
@@ -664,11 +671,17 @@ bool scatter(Ray rIn, HitRecord rec, out vec3 attenuation, out Ray scattered) {
         // Checker pattern - polished floor
         vec3 p = rec.point * mat.param;
 
-        // 3D checker: alternating based on floor of coordinates
-        int ix = int(floor(p.x));
-        int iy = int(floor(p.y));
-        int iz = int(floor(p.z));
-        bool isEven = ((ix + iy + iz) & 1) == 0;
+        // Use fract() based checker - more numerically stable than floor()
+        // This avoids precision issues at integer boundaries
+        float fx = fract(p.x * 0.5) * 2.0;  // 0 to 2, wraps every 2 units
+        float fy = fract(p.y * 0.5) * 2.0;
+        float fz = fract(p.z * 0.5) * 2.0;
+
+        // XOR-style checker: each axis flips when crossing 1.0
+        bool flipX = fx >= 1.0;
+        bool flipY = fy >= 1.0;
+        bool flipZ = fz >= 1.0;
+        bool isEven = (flipX ^^ flipY ^^ flipZ);
 
         vec3 diffuseColor = isEven ? mat.albedo : mat.emission;
 
