@@ -16,6 +16,7 @@ RayTracingRenderer::RayTracingRenderer(QVulkanWindow* window)
     auto scene = createTestScene();
     m_spheres = std::move(scene.spheres);
     m_boxes = std::move(scene.boxes);
+    m_spotLights = std::move(scene.spotLights);
     m_materials = std::move(scene.materials);
 
     m_camera.distance = 12.0f;
@@ -104,6 +105,14 @@ void RayTracingRenderer::releaseResources() {
     if (m_boxBufferMemory) {
         m_devFuncs->vkFreeMemory(dev, m_boxBufferMemory, nullptr);
         m_boxBufferMemory = VK_NULL_HANDLE;
+    }
+    if (m_spotLightBuffer) {
+        m_devFuncs->vkDestroyBuffer(dev, m_spotLightBuffer, nullptr);
+        m_spotLightBuffer = VK_NULL_HANDLE;
+    }
+    if (m_spotLightBufferMemory) {
+        m_devFuncs->vkFreeMemory(dev, m_spotLightBufferMemory, nullptr);
+        m_spotLightBufferMemory = VK_NULL_HANDLE;
     }
     if (m_materialBuffer) {
         m_devFuncs->vkDestroyBuffer(dev, m_materialBuffer, nullptr);
@@ -199,6 +208,7 @@ void RayTracingRenderer::createStorageImages() {
 void RayTracingRenderer::createSceneBuffers() {
     VkDeviceSize sphereSize = sizeof(Sphere) * m_spheres.size();
     VkDeviceSize boxSize = sizeof(Box) * std::max(m_boxes.size(), size_t(1));  // At least 1 to avoid 0-size buffer
+    VkDeviceSize spotLightSize = sizeof(SpotLight) * std::max(m_spotLights.size(), size_t(1));
     VkDeviceSize materialSize = sizeof(Material) * m_materials.size();
     VkDeviceSize cameraSize = sizeof(CameraData);
 
@@ -209,6 +219,10 @@ void RayTracingRenderer::createSceneBuffers() {
     createBuffer(boxSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                  m_boxBuffer, m_boxBufferMemory);
+
+    createBuffer(spotLightSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 m_spotLightBuffer, m_spotLightBufferMemory);
 
     createBuffer(materialSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
@@ -232,6 +246,12 @@ void RayTracingRenderer::createSceneBuffers() {
         m_devFuncs->vkUnmapMemory(dev, m_boxBufferMemory);
     }
 
+    if (!m_spotLights.empty()) {
+        m_devFuncs->vkMapMemory(dev, m_spotLightBufferMemory, 0, spotLightSize, 0, &data);
+        memcpy(data, m_spotLights.data(), sizeof(SpotLight) * m_spotLights.size());
+        m_devFuncs->vkUnmapMemory(dev, m_spotLightBufferMemory);
+    }
+
     m_devFuncs->vkMapMemory(dev, m_materialBufferMemory, 0, materialSize, 0, &data);
     memcpy(data, m_materials.data(), materialSize);
     m_devFuncs->vkUnmapMemory(dev, m_materialBufferMemory);
@@ -246,7 +266,7 @@ void RayTracingRenderer::createDescriptorSet() {
     // Create descriptor pool
     std::array<VkDescriptorPoolSize, 3> poolSizes{};
     poolSizes[0] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2};
-    poolSizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3};  // spheres, materials, boxes
+    poolSizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4};  // spheres, materials, boxes, spotlights
     poolSizes[2] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1};
 
     VkDescriptorPoolCreateInfo poolInfo{};
@@ -299,7 +319,12 @@ void RayTracingRenderer::createDescriptorSet() {
     boxBufferInfo.offset = 0;
     boxBufferInfo.range = VK_WHOLE_SIZE;
 
-    std::array<VkWriteDescriptorSet, 6> writes{};
+    VkDescriptorBufferInfo spotLightBufferInfo{};
+    spotLightBufferInfo.buffer = m_spotLightBuffer;
+    spotLightBufferInfo.offset = 0;
+    spotLightBufferInfo.range = VK_WHOLE_SIZE;
+
+    std::array<VkWriteDescriptorSet, 7> writes{};
 
     // Binding 0: output image
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -349,6 +374,14 @@ void RayTracingRenderer::createDescriptorSet() {
     writes[5].descriptorCount = 1;
     writes[5].pBufferInfo = &boxBufferInfo;
 
+    // Binding 6: spotlights buffer
+    writes[6].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[6].dstSet = m_descriptorSet;
+    writes[6].dstBinding = 6;
+    writes[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[6].descriptorCount = 1;
+    writes[6].pBufferInfo = &spotLightBufferInfo;
+
     m_devFuncs->vkUpdateDescriptorSets(dev, writes.size(), writes.data(), 0, nullptr);
 }
 
@@ -356,7 +389,7 @@ void RayTracingRenderer::createComputePipeline() {
     VkDevice dev = m_window->device();
 
     // Create descriptor set layout
-    std::array<VkDescriptorSetLayoutBinding, 6> bindings{};
+    std::array<VkDescriptorSetLayoutBinding, 7> bindings{};
 
     // Binding 0: output image
     bindings[0].binding = 0;
@@ -393,6 +426,12 @@ void RayTracingRenderer::createComputePipeline() {
     bindings[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[5].descriptorCount = 1;
     bindings[5].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    // Binding 6: spotlights SSBO
+    bindings[6].binding = 6;
+    bindings[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[6].descriptorCount = 1;
+    bindings[6].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -483,6 +522,7 @@ void RayTracingRenderer::recordComputeCommands(VkCommandBuffer cmdBuf, bool isSt
     pc.maxBounces = 5;
     pc.sphereCount = static_cast<uint32_t>(m_spheres.size());
     pc.boxCount = static_cast<uint32_t>(m_boxes.size());
+    pc.spotLightCount = static_cast<uint32_t>(m_spotLights.size());
     pc.width = sz.width();
     pc.height = sz.height();
     pc.useNEE = 1;
@@ -745,6 +785,30 @@ void RayTracingWindow::wheelEvent(QWheelEvent* event) {
     }
 }
 
+void RayTracingRenderer::cycleGobos(int direction) {
+    if (m_spotLights.empty()) return;
+
+    constexpr uint32_t numGoboTypes = 7;  // None, Stripes, Grid, Circles, Dots, Star, Off
+
+    // Cycle all spotlights together
+    for (auto& light : m_spotLights) {
+        int newType = static_cast<int>(light.goboType) + direction;
+        if (newType < 0) newType = numGoboTypes - 1;
+        if (newType >= static_cast<int>(numGoboTypes)) newType = 0;
+        light.goboType = static_cast<uint32_t>(newType);
+    }
+
+    // Re-upload spotlight buffer
+    VkDevice dev = m_window->device();
+    VkDeviceSize size = sizeof(SpotLight) * m_spotLights.size();
+    void* data;
+    m_devFuncs->vkMapMemory(dev, m_spotLightBufferMemory, 0, size, 0, &data);
+    memcpy(data, m_spotLights.data(), size);
+    m_devFuncs->vkUnmapMemory(dev, m_spotLightBufferMemory);
+
+    markCameraMotion();  // Reset accumulation to see change immediately
+}
+
 bool RayTracingRenderer::saveScreenshot(const QString& filename) {
     VkDevice dev = m_window->device();
     uint32_t width = m_window->swapChainImageSize().width();
@@ -879,5 +943,11 @@ void RayTracingWindow::keyPressEvent(QKeyEvent* event) {
     } else if (event->key() == Qt::Key_BraceRight && m_renderer) {
         // } - raise sun (elevation)
         m_renderer->adjustSunElevation(0.1f);
+    } else if (event->key() == Qt::Key_Comma && m_renderer) {
+        // , - previous gobo pattern
+        m_renderer->cycleGobos(-1);
+    } else if (event->key() == Qt::Key_Period && m_renderer) {
+        // . - next gobo pattern
+        m_renderer->cycleGobos(1);
     }
 }

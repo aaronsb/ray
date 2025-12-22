@@ -25,6 +25,21 @@ struct Box {
     float _pad[3];
 };  // Total: 48 bytes
 
+struct SpotLight {
+    vec3 position;
+    float _pos_pad;
+    vec3 direction;      // normalized
+    float _dir_pad;
+    vec3 color;          // emission color/intensity
+    float _col_pad;
+    float innerAngle;    // radians - full intensity cone
+    float outerAngle;    // radians - falloff to zero
+    uint goboType;       // 0=none, 1=stripes, 2=grid, 3=circles, 4=dots, 5=star
+    float goboScale;     // pattern scale
+    float goboRotation;  // pattern rotation in radians
+    float _pad[3];
+};  // Total: 80 bytes
+
 struct Material {
     vec3 albedo;
     float _pad1;
@@ -46,6 +61,10 @@ layout(std430, set = 0, binding = 3) readonly buffer MaterialBuffer {
 
 layout(std430, set = 0, binding = 5) readonly buffer BoxBuffer {
     Box boxes[];
+};
+
+layout(std430, set = 0, binding = 6) readonly buffer SpotLightBuffer {
+    SpotLight spotLights[];
 };
 
 layout(std140, set = 0, binding = 4) uniform CameraUBO {
@@ -73,6 +92,7 @@ layout(push_constant) uniform PushConstants {
     uint maxBounces;
     uint sphereCount;
     uint boxCount;
+    uint spotLightCount;
     uint width;
     uint height;
     uint useNEE;
@@ -763,6 +783,90 @@ bool shadowRay(vec3 origin, vec3 dir, float maxDist) {
     return false; // Nothing hit, light is visible
 }
 
+// ============ SPOTLIGHT FUNCTIONS ============
+
+// Evaluate gobo pattern at a 2D coordinate
+// Returns 0.0 (blocked) to 1.0 (full light)
+float evaluateGobo(uint goboType, vec2 uv, float scale, float rotation) {
+    // Apply rotation
+    float c = cos(rotation);
+    float s = sin(rotation);
+    vec2 ruv = vec2(c * uv.x - s * uv.y, s * uv.x + c * uv.y);
+    ruv *= scale;
+
+    if (goboType == 0u) {
+        // No gobo - full light
+        return 1.0;
+    } else if (goboType == 1u) {
+        // Stripes - vertical bars
+        return step(0.5, fract(ruv.x));
+    } else if (goboType == 2u) {
+        // Grid - window pattern
+        float bars = step(0.3, fract(ruv.x)) * step(0.3, fract(ruv.y));
+        return bars;
+    } else if (goboType == 3u) {
+        // Circles - concentric rings
+        float r = length(ruv);
+        return step(0.5, fract(r));
+    } else if (goboType == 4u) {
+        // Dots - array of circles
+        vec2 cell = fract(ruv) - 0.5;
+        return 1.0 - smoothstep(0.2, 0.25, length(cell));
+    } else if (goboType == 5u) {
+        // Star - radial burst pattern
+        float angle = atan(ruv.y, ruv.x);
+        float rays = abs(sin(angle * 6.0));
+        float r = length(ruv);
+        return smoothstep(0.0, 0.5, rays) * smoothstep(2.0, 0.0, r);
+    } else if (goboType == 6u) {
+        // Off - light completely disabled
+        return 0.0;
+    }
+    return 1.0;
+}
+
+// Evaluate spotlight contribution at a given point
+// Returns the light color/intensity multiplied by cone falloff and gobo pattern
+vec3 evaluateSpotLight(SpotLight light, vec3 point, vec3 normal, out vec3 lightDir, out float distance) {
+    vec3 toLight = light.position - point;
+    distance = length(toLight);
+    lightDir = toLight / distance;
+
+    // Check if point is in front of the spotlight
+    float cosAngle = dot(-lightDir, light.direction);
+    if (cosAngle <= cos(light.outerAngle)) {
+        return vec3(0.0);  // Outside outer cone
+    }
+
+    // Cone falloff - smooth transition from inner to outer
+    float cosInner = cos(light.innerAngle);
+    float cosOuter = cos(light.outerAngle);
+    float spotFalloff = smoothstep(cosOuter, cosInner, cosAngle);
+
+    // Distance attenuation (inverse square law)
+    float attenuation = 1.0 / (distance * distance);
+
+    // Compute UV for gobo pattern
+    // Project point onto plane perpendicular to light direction
+    vec3 lightRight, lightUp;
+    if (abs(light.direction.y) < 0.99) {
+        lightRight = normalize(cross(light.direction, vec3(0, 1, 0)));
+    } else {
+        lightRight = normalize(cross(light.direction, vec3(1, 0, 0)));
+    }
+    lightUp = cross(light.direction, lightRight);
+
+    // Project the light-to-point vector onto the plane
+    vec3 toPointLocal = -toLight;
+    vec2 goboUV = vec2(dot(toPointLocal, lightRight), dot(toPointLocal, lightUp));
+    // Normalize by distance to get angular coordinates
+    goboUV /= distance;
+
+    float goboMask = evaluateGobo(light.goboType, goboUV, light.goboScale, light.goboRotation);
+
+    return light.color * spotFalloff * attenuation * goboMask;
+}
+
 // Path tracing with Next Event Estimation
 vec3 tracePath(Ray ray) {
     vec3 radiance = vec3(0.0);
@@ -965,6 +1069,37 @@ vec3 tracePath(Ray ray) {
                     float neeFactor = clamp(float(pc.frameIndex) / 200.0, 0.0, 1.0);
                     float neeClamp = mix(2.0, 50.0, neeFactor * neeFactor);
                     radiance += min(directLight, vec3(neeClamp));
+                }
+            }
+        }
+
+        // NEE: Sample spotlights for diffuse surfaces
+        if (pc.useNEE == 1 && mat.type == 0 && pc.spotLightCount > 0u) {
+            for (uint i = 0u; i < pc.spotLightCount; i++) {
+                SpotLight light = spotLights[i];
+
+                vec3 lightDir;
+                float lightDist;
+                vec3 lightContrib = evaluateSpotLight(light, rec.point, rec.normal, lightDir, lightDist);
+
+                if (length(lightContrib) > 0.0) {
+                    float NdotL = dot(rec.normal, lightDir);
+
+                    if (NdotL > 0.0) {
+                        // Shadow ray to spotlight
+                        vec3 shadowOrigin = rec.point + rec.normal * 0.001;
+                        if (!shadowRay(shadowOrigin, lightDir, lightDist)) {
+                            // BRDF for diffuse = albedo / PI
+                            vec3 brdf = mat.albedo / PI;
+
+                            vec3 directLight = throughput * brdf * lightContrib * NdotL;
+
+                            // Frame-based firefly clamp
+                            float neeFactor = clamp(float(pc.frameIndex) / 200.0, 0.0, 1.0);
+                            float neeClamp = mix(2.0, 50.0, neeFactor * neeFactor);
+                            radiance += min(directLight, vec3(neeClamp));
+                        }
+                    }
                 }
             }
         }

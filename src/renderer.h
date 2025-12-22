@@ -38,6 +38,9 @@ public:
     float sunElevation() const { return m_sunElevation; }
     float sunAzimuth() const { return m_sunAzimuth; }
 
+    // Gobo control - cycle through patterns for all spotlights
+    void cycleGobos(int direction);
+
     // Stats
     float lastFrameTimeMs() const { return m_lastFrameTimeMs; }
     uint32_t frameIndex() const { return m_frameIndex; }
@@ -53,6 +56,7 @@ private:
     OrbitCamera m_camera;
     std::vector<Sphere> m_spheres;
     std::vector<Box> m_boxes;
+    std::vector<SpotLight> m_spotLights;
     std::vector<Material> m_materials;
 
     // Vulkan resources
@@ -77,6 +81,8 @@ private:
     VkDeviceMemory m_sphereBufferMemory = VK_NULL_HANDLE;
     VkBuffer m_boxBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_boxBufferMemory = VK_NULL_HANDLE;
+    VkBuffer m_spotLightBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_spotLightBufferMemory = VK_NULL_HANDLE;
     VkBuffer m_materialBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_materialBufferMemory = VK_NULL_HANDLE;
 

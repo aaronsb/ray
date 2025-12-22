@@ -79,6 +79,30 @@ struct alignas(16) Box {
     float _pad[3];         // pad to 16 bytes
 };
 
+// Gobo pattern types for spotlights
+enum class GoboType : uint32_t {
+    None = 0,       // No pattern, solid light
+    Stripes = 1,    // Vertical stripes
+    Grid = 2,       // Grid/window pattern
+    Circles = 3,    // Concentric circles
+    Dots = 4,       // Dot array
+    Star = 5,       // Star/burst pattern
+    Off = 6         // Light completely off
+};
+
+// GPU spotlight - 80 bytes, 16-byte aligned
+struct alignas(16) SpotLight {
+    Vec3 position;         // 16 bytes
+    Vec3 direction;        // 16 bytes (normalized)
+    Vec3 color;            // 16 bytes (emission color/intensity)
+    float innerAngle;      // radians - full intensity cone
+    float outerAngle;      // radians - falloff to zero
+    uint32_t goboType;     // GoboType enum
+    float goboScale;       // pattern scale (larger = more repetitions)
+    float goboRotation;    // pattern rotation in radians
+    float _pad[3];         // pad to 16 bytes
+};
+
 // Camera uniform data - matches shader layout
 struct alignas(16) CameraData {
     Vec3 origin;
@@ -97,13 +121,13 @@ struct alignas(16) PushConstants {
     uint32_t maxBounces;
     uint32_t sphereCount;
     uint32_t boxCount;
+    uint32_t spotLightCount;
     uint32_t width;
     uint32_t height;
     uint32_t useNEE;
     uint32_t accumulate;  // 0 = no accumulation (moving), 1 = accumulate (stationary)
     float sunElevation;   // radians, 0 = horizon, PI/2 = zenith
     float sunAzimuth;     // radians, angle around Y axis
-    float _pad;
 };
 
 // Orbit camera controller
@@ -190,6 +214,7 @@ public:
 struct SceneData {
     std::vector<Sphere> spheres;
     std::vector<Box> boxes;
+    std::vector<SpotLight> spotLights;
     std::vector<Material> materials;
 };
 
@@ -348,6 +373,50 @@ inline SceneData createTestScene() {
         float x = roygbivStartX + i * roygbivSpacing;
         spheres.push_back({{x, roygbivY, roygbivZ}, roygbivRadius, uint32_t(17 + i)});
     }
+
+    // === SPOTLIGHTS ===
+    auto& spotLights = scene.spotLights;
+    constexpr float deg2rad = 3.14159265f / 180.0f;
+
+    // Spotlight 1: White spot with grid gobo, aimed at ROYGBIV rainbow spheres
+    // Rainbow is at z=5.5, y=0.5, x=-3.6 to +3.6
+    spotLights.push_back({
+        {0.0f, 6.0f, 9.0f},           // position (behind and above rainbow)
+        Vec3{0.0f, -0.4f, -1.0f}.normalized(),  // angled down towards rainbow
+        {800.0f, 750.0f, 700.0f},     // warm white, bright
+        20.0f * deg2rad,              // inner angle - wide enough for all 7 spheres
+        35.0f * deg2rad,              // outer angle
+        (uint32_t)GoboType::Grid,     // gobo pattern
+        3.0f,                         // gobo scale
+        0.0f,                         // gobo rotation
+        {}
+    });
+
+    // Spotlight 2: Blue spot with stripes, angled from the side
+    spotLights.push_back({
+        {-8.0f, 6.0f, 4.0f},          // position
+        Vec3{0.6f, -0.6f, -0.3f}.normalized(),  // angled direction
+        {100.0f, 200.0f, 800.0f},     // blue tint
+        10.0f * deg2rad,              // tight inner
+        20.0f * deg2rad,              // outer
+        (uint32_t)GoboType::Stripes,  // stripes gobo
+        6.0f,                         // scale
+        0.785f,                       // 45 degree rotation
+        {}
+    });
+
+    // Spotlight 3: Red/orange spot with circles, from the other side
+    spotLights.push_back({
+        {8.0f, 5.0f, -2.0f},          // position
+        Vec3{-0.5f, -0.7f, 0.2f}.normalized(),
+        {600.0f, 200.0f, 50.0f},      // orange/red
+        12.0f * deg2rad,
+        22.0f * deg2rad,
+        (uint32_t)GoboType::Circles,
+        3.0f,
+        0.0f,
+        {}
+    });
 
     return scene;
 }
