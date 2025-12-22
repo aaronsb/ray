@@ -68,8 +68,8 @@ src/
     scene.h                  # Scene container with JSON serialization
     renderer.h/.cpp          # Vulkan renderer and window
 
-  demos/
-    raydemo/                 # Demo executable
+  apps/
+    raydemo/                 # Ray tracing demo
       main.cpp               # Application entry point
       test_scene.h/.cpp      # Scene factory function
 
@@ -86,11 +86,11 @@ docs/
   adr/                       # Architecture Decision Records
 ```
 
-## Creating a New Demo
+## Creating a New App
 
-1. Create a new directory under `src/demos/`:
+1. Create a new directory under `src/apps/`:
    ```
-   src/demos/mydemo/
+   src/apps/myapp/
      main.cpp
      my_scene.h
      my_scene.cpp
@@ -124,16 +124,16 @@ docs/
 
 4. Add to CMakeLists.txt:
    ```cmake
-   add_demo(mydemo ${CMAKE_SOURCE_DIR}/src/demos/mydemo
-       src/demos/mydemo/main.cpp
-       src/demos/mydemo/my_scene.cpp
+   add_demo(myapp ${CMAKE_SOURCE_DIR}/src/apps/myapp
+       src/apps/myapp/main.cpp
+       src/apps/myapp/my_scene.cpp
    )
    ```
 
 5. Build and run:
    ```bash
    cmake --build build
-   ./build/mydemo
+   ./build/myapp
    ```
 
 ## Technical Notes

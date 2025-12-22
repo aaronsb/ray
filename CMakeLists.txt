@@ -101,9 +101,9 @@ function(add_demo name dir)
     endif()
 endfunction()
 
-# ============ DEMOS ============
+# ============ APPS ============
 
-add_demo(raydemo ${CMAKE_SOURCE_DIR}/src/demos/raydemo
-    src/demos/raydemo/main.cpp
-    src/demos/raydemo/test_scene.cpp
+add_demo(raydemo ${CMAKE_SOURCE_DIR}/src/apps/raydemo
+    src/apps/raydemo/main.cpp
+    src/apps/raydemo/test_scene.cpp
 )
