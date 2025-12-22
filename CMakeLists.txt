@@ -50,37 +50,60 @@ endforeach()
 
 add_custom_target(shaders DEPENDS ${SHADER_SPV_FILES})
 
-qt_add_executable(raydemo
-    src/main.cpp
-    src/renderer.cpp
-    src/renderer.h
-    src/scene.h
+# ============ CORE LIBRARY ============
+
+add_library(raycore STATIC
+    src/core/renderer.cpp
 )
 
-add_dependencies(raydemo shaders)
-
-target_include_directories(raydemo PRIVATE
-    ${CMAKE_SOURCE_DIR}/src
+target_include_directories(raycore PUBLIC
+    ${CMAKE_SOURCE_DIR}/src/core
     ${Vulkan_INCLUDE_DIRS}
 )
 
-target_link_libraries(raydemo PRIVATE
+target_link_libraries(raycore PUBLIC
     Qt6::Core
     Qt6::Gui
-    Qt6::Widgets
     Vulkan::Vulkan
-)
-
-# Copy shaders to build directory on build
-add_custom_command(TARGET raydemo POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-    ${SHADER_BINARY_DIR} $<TARGET_FILE_DIR:raydemo>/shaders
 )
 
 # Enable LTO for release builds
 include(CheckIPOSupported)
 check_ipo_supported(RESULT IPO_SUPPORTED)
 if(IPO_SUPPORTED)
-    set_property(TARGET raydemo PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
-    set_property(TARGET raydemo PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO TRUE)
+    set_property(TARGET raycore PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    set_property(TARGET raycore PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO TRUE)
 endif()
+
+# ============ DEMO HELPER FUNCTION ============
+
+function(add_demo name dir)
+    qt_add_executable(${name} ${ARGN})
+
+    add_dependencies(${name} shaders)
+
+    target_include_directories(${name} PRIVATE ${dir})
+
+    target_link_libraries(${name} PRIVATE
+        raycore
+        Qt6::Widgets
+    )
+
+    # Copy shaders to build directory
+    add_custom_command(TARGET ${name} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${SHADER_BINARY_DIR} $<TARGET_FILE_DIR:${name}>/shaders
+    )
+
+    if(IPO_SUPPORTED)
+        set_property(TARGET ${name} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+        set_property(TARGET ${name} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO TRUE)
+    endif()
+endfunction()
+
+# ============ DEMOS ============
+
+add_demo(raydemo ${CMAKE_SOURCE_DIR}/src/demos/raydemo
+    src/demos/raydemo/main.cpp
+    src/demos/raydemo/test_scene.cpp
+)

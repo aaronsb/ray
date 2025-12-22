@@ -10,9 +10,9 @@
 #include <QThread>
 #include <cstring>
 
-RayTracingRenderer::RayTracingRenderer(QVulkanWindow* window)
+RayTracingRenderer::RayTracingRenderer(QVulkanWindow* window, Scene scene)
     : m_window(window)
-    , m_scene(createTestScene())
+    , m_scene(std::move(scene))
 {
     m_camera.distance = 12.0f;
     m_camera.elevation = 0.4f;
@@ -745,7 +745,7 @@ void RayTracingRenderer::transitionImageLayout(VkCommandBuffer cmdBuf, VkImage i
 // RayTracingWindow implementation
 
 QVulkanWindowRenderer* RayTracingWindow::createRenderer() {
-    m_renderer = new RayTracingRenderer(this);
+    m_renderer = new RayTracingRenderer(this, std::move(m_scene));
     return m_renderer;
 }
 

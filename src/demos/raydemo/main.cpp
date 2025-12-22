@@ -3,6 +3,7 @@
 #include <QLoggingCategory>
 #include <QTimer>
 #include "renderer.h"
+#include "test_scene.h"
 
 int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
@@ -23,6 +24,7 @@ int main(int argc, char* argv[]) {
     }
 
     RayTracingWindow window;
+    window.setScene(createTestScene());
     window.setVulkanInstance(&inst);
     window.resize(1920, 1080);
     window.show();

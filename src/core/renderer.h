@@ -8,7 +8,7 @@
 
 class RayTracingRenderer : public QVulkanWindowRenderer {
 public:
-    explicit RayTracingRenderer(QVulkanWindow* window);
+    explicit RayTracingRenderer(QVulkanWindow* window, Scene scene);
 
     void initResources() override;
     void initSwapChainResources() override;
@@ -129,6 +129,7 @@ private:
 class RayTracingWindow : public QVulkanWindow {
     Q_OBJECT
 public:
+    void setScene(Scene scene) { m_scene = std::move(scene); }
     QVulkanWindowRenderer* createRenderer() override;
 
     RayTracingRenderer* renderer() const { return m_renderer; }
@@ -141,6 +142,7 @@ protected:
     void keyPressEvent(QKeyEvent* event) override;
 
 private:
+    Scene m_scene;
     RayTracingRenderer* m_renderer = nullptr;
     QPointF m_lastMousePos;
     bool m_leftMousePressed = false;
