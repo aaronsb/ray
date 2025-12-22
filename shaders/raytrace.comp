@@ -48,6 +48,17 @@ struct Cone {
     uint cap;
 };
 
+struct Torus {
+    vec3 center;
+    float _center_pad;
+    vec3 axis;
+    float _axis_pad;
+    float majorRadius;
+    float minorRadius;
+    uint materialId;
+    uint _pad;
+};
+
 struct SpotLight {
     vec3 position;
     float _pos_pad;
@@ -100,6 +111,10 @@ layout(std430, set = 0, binding = 8) readonly buffer ConeBuffer {
     Cone cones[];
 };
 
+layout(std430, set = 0, binding = 9) readonly buffer TorusBuffer {
+    Torus tori[];
+};
+
 layout(std140, set = 0, binding = 4) uniform CameraUBO {
     vec3 origin;
     float _pad1;
@@ -127,6 +142,7 @@ layout(push_constant) uniform PushConstants {
     uint boxCount;
     uint cylinderCount;
     uint coneCount;
+    uint torusCount;
     uint spotLightCount;
     uint width;
     uint height;

@@ -261,6 +261,147 @@ bool hitCone(Cone cone, Ray r, float tMin, float tMax, inout HitRecord rec) {
     return hit;
 }
 
+// Torus intersection using Newton iteration
+// Torus defined by center, axis (through the hole), major radius R, minor radius r
+bool hitTorus(Torus torus, Ray r, float tMin, float tMax, inout HitRecord rec) {
+    // Transform ray to torus-local space where axis = (0,1,0) and center = origin
+    vec3 localOrigin = r.origin - torus.center;
+
+    // Build rotation from torus.axis to Y axis
+    vec3 axis = torus.axis;
+    vec3 up = vec3(0.0, 1.0, 0.0);
+
+    // If axis is already Y (or -Y), use simpler transform
+    vec3 rotatedOrigin, rotatedDir;
+    if (abs(dot(axis, up)) > 0.999) {
+        float sign = dot(axis, up) > 0.0 ? 1.0 : -1.0;
+        rotatedOrigin = localOrigin * vec3(1.0, sign, 1.0);
+        rotatedDir = r.direction * vec3(1.0, sign, 1.0);
+    } else {
+        // Rodrigues rotation formula
+        vec3 rotAxis = normalize(cross(axis, up));
+        float cosAngle = dot(axis, up);
+        float sinAngle = length(cross(axis, up));
+
+        // Rotate origin
+        rotatedOrigin = localOrigin * cosAngle
+                      + cross(rotAxis, localOrigin) * sinAngle
+                      + rotAxis * dot(rotAxis, localOrigin) * (1.0 - cosAngle);
+
+        // Rotate direction
+        rotatedDir = r.direction * cosAngle
+                   + cross(rotAxis, r.direction) * sinAngle
+                   + rotAxis * dot(rotAxis, r.direction) * (1.0 - cosAngle);
+    }
+
+    float R = torus.majorRadius;
+    float rr = torus.minorRadius;
+
+    // Ray: P(t) = O + t*D
+    vec3 O = rotatedOrigin;
+    vec3 D = rotatedDir;
+
+    // For torus: (sqrt(x² + z²) - R)² + y² = r²
+    // We solve using Newton iteration on the distance function
+
+    // Start with sphere bounding box intersection for initial t
+    float boundR = R + rr;
+    vec3 oc = O;
+    float a = dot(D, D);
+    float b = 2.0 * dot(oc, D);
+    float c = dot(oc, oc) - boundR * boundR;
+    float disc = b * b - 4.0 * a * c;
+
+    if (disc < 0.0) return false;
+
+    float sqrtDisc = sqrt(disc);
+    float t0 = (-b - sqrtDisc) / (2.0 * a);
+    float t1 = (-b + sqrtDisc) / (2.0 * a);
+
+    if (t1 < tMin) return false;
+    if (t0 > tMax) return false;
+
+    // Distance function for torus: f(p) = (sqrt(px² + pz²) - R)² + py² - r²
+    // We want f(O + t*D) = 0
+
+    float bestT = tMax + 1.0;
+
+    // Try multiple starting points along the ray
+    float searchStart = max(t0, tMin);
+    float searchEnd = min(t1, tMax);
+
+    for (int start = 0; start < 4; start++) {
+        float t = searchStart + (searchEnd - searchStart) * float(start) / 4.0;
+
+        // Newton iteration
+        for (int iter = 0; iter < 20; iter++) {
+            vec3 p = O + t * D;
+            float px2pz2 = p.x * p.x + p.z * p.z;
+            float sqrtXZ = sqrt(px2pz2 + EPSILON);
+
+            // f(t) = (sqrtXZ - R)² + py² - r²
+            float f = (sqrtXZ - R) * (sqrtXZ - R) + p.y * p.y - rr * rr;
+
+            // f'(t) = 2(sqrtXZ - R) * d(sqrtXZ)/dt + 2*py*Dy
+            // d(sqrtXZ)/dt = (px*Dx + pz*Dz) / sqrtXZ
+            float dSqrtXZ = (p.x * D.x + p.z * D.z) / sqrtXZ;
+            float df = 2.0 * (sqrtXZ - R) * dSqrtXZ + 2.0 * p.y * D.y;
+
+            if (abs(df) < EPSILON) break;
+
+            float tNew = t - f / df;
+
+            if (abs(f) < EPSILON * 0.1) {
+                if (tNew >= tMin && tNew < bestT && tNew <= tMax) {
+                    bestT = tNew;
+                }
+                break;
+            }
+
+            t = tNew;
+            if (t < searchStart || t > searchEnd) break;
+        }
+    }
+
+    if (bestT > tMax) return false;
+
+    // Compute hit point and normal in local space
+    vec3 localP = O + bestT * D;
+    float sqrtXZ = sqrt(localP.x * localP.x + localP.z * localP.z + EPSILON);
+
+    // Normal: gradient of f, normalized
+    // grad f = 2 * ((sqrtXZ - R) * (x/sqrtXZ, 0, z/sqrtXZ) + (0, y, 0))
+    vec3 localNormal = normalize(vec3(
+        (sqrtXZ - R) * localP.x / sqrtXZ,
+        localP.y,
+        (sqrtXZ - R) * localP.z / sqrtXZ
+    ));
+
+    // Transform normal back to world space
+    vec3 worldNormal;
+    vec3 axis2 = torus.axis;
+    if (abs(dot(axis2, up)) > 0.999) {
+        float sign = dot(axis2, up) > 0.0 ? 1.0 : -1.0;
+        worldNormal = localNormal * vec3(1.0, sign, 1.0);
+    } else {
+        // Inverse rotation (negate angle)
+        vec3 rotAxis = normalize(cross(axis2, up));
+        float cosAngle = dot(axis2, up);
+        float sinAngle = -length(cross(axis2, up));  // negated for inverse
+
+        worldNormal = localNormal * cosAngle
+                    + cross(rotAxis, localNormal) * sinAngle
+                    + rotAxis * dot(rotAxis, localNormal) * (1.0 - cosAngle);
+    }
+
+    rec.t = bestT;
+    rec.point = r.origin + bestT * r.direction;
+    setFaceNormal(rec, r, normalize(worldNormal));
+    rec.materialId = torus.materialId;
+
+    return true;
+}
+
 // Ground plane intersection (y = 0, bounded)
 bool hitGroundPlane(Ray r, float tMin, float tMax, inout HitRecord rec, uint materialId) {
     // Plane at y = 0 with normal pointing up
@@ -335,6 +476,15 @@ bool hitScene(Ray r, float tMin, float tMax, inout HitRecord rec) {
     // Check cones
     for (uint i = 0; i < pc.coneCount; i++) {
         if (hitCone(cones[i], r, tMin, closestSoFar, tempRec)) {
+            hitAnything = true;
+            closestSoFar = tempRec.t;
+            rec = tempRec;
+        }
+    }
+
+    // Check tori
+    for (uint i = 0; i < pc.torusCount; i++) {
+        if (hitTorus(tori[i], r, tMin, closestSoFar, tempRec)) {
             hitAnything = true;
             closestSoFar = tempRec.t;
             rec = tempRec;

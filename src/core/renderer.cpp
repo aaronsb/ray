@@ -125,6 +125,14 @@ void RayTracingRenderer::releaseResources() {
         m_devFuncs->vkFreeMemory(dev, m_coneBufferMemory, nullptr);
         m_coneBufferMemory = VK_NULL_HANDLE;
     }
+    if (m_torusBuffer) {
+        m_devFuncs->vkDestroyBuffer(dev, m_torusBuffer, nullptr);
+        m_torusBuffer = VK_NULL_HANDLE;
+    }
+    if (m_torusBufferMemory) {
+        m_devFuncs->vkFreeMemory(dev, m_torusBufferMemory, nullptr);
+        m_torusBufferMemory = VK_NULL_HANDLE;
+    }
     if (m_materialBuffer) {
         m_devFuncs->vkDestroyBuffer(dev, m_materialBuffer, nullptr);
         m_materialBuffer = VK_NULL_HANDLE;
@@ -229,6 +237,7 @@ void RayTracingRenderer::createSceneBuffers() {
     const auto& boxes = m_scene.boxes();
     const auto& cylinders = m_scene.cylinders();
     const auto& cones = m_scene.cones();
+    const auto& tori = m_scene.tori();
     const auto& spotLights = m_scene.spotLights();
     const auto& materials = m_scene.materials();
 
@@ -236,6 +245,7 @@ void RayTracingRenderer::createSceneBuffers() {
     VkDeviceSize boxSize = sizeof(Box) * std::max(boxes.size(), size_t(1));
     VkDeviceSize cylinderSize = sizeof(Cylinder) * std::max(cylinders.size(), size_t(1));
     VkDeviceSize coneSize = sizeof(Cone) * std::max(cones.size(), size_t(1));
+    VkDeviceSize torusSize = sizeof(Torus) * std::max(tori.size(), size_t(1));
     VkDeviceSize spotLightSize = sizeof(SpotLight) * std::max(spotLights.size(), size_t(1));
     VkDeviceSize materialSize = sizeof(Material) * materials.size();
     VkDeviceSize cameraSize = sizeof(CameraData);
@@ -255,6 +265,10 @@ void RayTracingRenderer::createSceneBuffers() {
     createBuffer(coneSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                  m_coneBuffer, m_coneBufferMemory);
+
+    createBuffer(torusSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 m_torusBuffer, m_torusBufferMemory);
 
     createBuffer(spotLightSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
@@ -294,6 +308,12 @@ void RayTracingRenderer::createSceneBuffers() {
         m_devFuncs->vkUnmapMemory(dev, m_coneBufferMemory);
     }
 
+    if (!tori.empty()) {
+        m_devFuncs->vkMapMemory(dev, m_torusBufferMemory, 0, torusSize, 0, &data);
+        memcpy(data, tori.data(), sizeof(Torus) * tori.size());
+        m_devFuncs->vkUnmapMemory(dev, m_torusBufferMemory);
+    }
+
     if (!spotLights.empty()) {
         m_devFuncs->vkMapMemory(dev, m_spotLightBufferMemory, 0, spotLightSize, 0, &data);
         memcpy(data, spotLights.data(), sizeof(SpotLight) * spotLights.size());
@@ -314,7 +334,7 @@ void RayTracingRenderer::createDescriptorSet() {
     // Create descriptor pool
     std::array<VkDescriptorPoolSize, 3> poolSizes{};
     poolSizes[0] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2};
-    poolSizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 6};  // spheres, materials, boxes, spotlights, cylinders, cones
+    poolSizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 7};  // spheres, materials, boxes, spotlights, cylinders, cones, tori
     poolSizes[2] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1};
 
     VkDescriptorPoolCreateInfo poolInfo{};
@@ -382,7 +402,12 @@ void RayTracingRenderer::createDescriptorSet() {
     coneBufferInfo.offset = 0;
     coneBufferInfo.range = VK_WHOLE_SIZE;
 
-    std::array<VkWriteDescriptorSet, 9> writes{};
+    VkDescriptorBufferInfo torusBufferInfo{};
+    torusBufferInfo.buffer = m_torusBuffer;
+    torusBufferInfo.offset = 0;
+    torusBufferInfo.range = VK_WHOLE_SIZE;
+
+    std::array<VkWriteDescriptorSet, 10> writes{};
 
     // Binding 0: output image
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -456,6 +481,14 @@ void RayTracingRenderer::createDescriptorSet() {
     writes[8].descriptorCount = 1;
     writes[8].pBufferInfo = &coneBufferInfo;
 
+    // Binding 9: tori buffer
+    writes[9].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[9].dstSet = m_descriptorSet;
+    writes[9].dstBinding = 9;
+    writes[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[9].descriptorCount = 1;
+    writes[9].pBufferInfo = &torusBufferInfo;
+
     m_devFuncs->vkUpdateDescriptorSets(dev, writes.size(), writes.data(), 0, nullptr);
 }
 
@@ -463,7 +496,7 @@ void RayTracingRenderer::createComputePipeline() {
     VkDevice dev = m_window->device();
 
     // Create descriptor set layout
-    std::array<VkDescriptorSetLayoutBinding, 9> bindings{};
+    std::array<VkDescriptorSetLayoutBinding, 10> bindings{};
 
     // Binding 0: output image
     bindings[0].binding = 0;
@@ -518,6 +551,12 @@ void RayTracingRenderer::createComputePipeline() {
     bindings[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[8].descriptorCount = 1;
     bindings[8].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    // Binding 9: tori SSBO
+    bindings[9].binding = 9;
+    bindings[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[9].descriptorCount = 1;
+    bindings[9].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -610,6 +649,7 @@ void RayTracingRenderer::recordComputeCommands(VkCommandBuffer cmdBuf, bool isSt
     pc.boxCount = m_scene.boxCount();
     pc.cylinderCount = m_scene.cylinderCount();
     pc.coneCount = m_scene.coneCount();
+    pc.torusCount = m_scene.torusCount();
     pc.spotLightCount = m_scene.spotLightCount();
     pc.width = sz.width();
     pc.height = sz.height();

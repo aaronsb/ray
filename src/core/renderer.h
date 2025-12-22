@@ -85,6 +85,8 @@ private:
     VkDeviceMemory m_cylinderBufferMemory = VK_NULL_HANDLE;
     VkBuffer m_coneBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_coneBufferMemory = VK_NULL_HANDLE;
+    VkBuffer m_torusBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_torusBufferMemory = VK_NULL_HANDLE;
     VkBuffer m_spotLightBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_spotLightBufferMemory = VK_NULL_HANDLE;
     VkBuffer m_materialBuffer = VK_NULL_HANDLE;

@@ -85,6 +85,8 @@ Scene createTestScene() {
     scene.addCylinder({-7.0f, 0.0f, -1.0f}, {0.0f, 1.0f, 0.0f}, 0.3f, 3.0f, 4, true);
     // Glass tube
     scene.addCylinder({7.0f, 0.0f, 2.5f}, {0.0f, 1.0f, 0.0f}, 0.4f, 2.0f, 5, true);
+    // Clear glass rod (horizontal)
+    scene.addCylinder({0.0f, 0.5f, 6.5f}, {1.0f, 0.0f, 0.0f}, 0.25f, 4.0f, 5, true);
     // Frosted horizontal rod
     scene.addCylinder({-3.0f, 2.0f, -6.0f}, {1.0f, 0.0f, 0.0f}, 0.15f, 6.0f, 7, true);
     // Wood log
@@ -99,6 +101,14 @@ Scene createTestScene() {
     scene.addCone({-5.5f, 0.6f, -3.0f}, {0.0f, 1.0f, 0.0f}, 0.5f, 1.0f, 10, true);
     // Dichroic cone
     scene.addCone({0.0f, 0.0f, -6.5f}, {0.0f, 1.0f, 0.0f}, 0.8f, 2.0f, 9, true);
+
+    // === TORI ===
+    // Glass torus (donut) - great for seeing refraction
+    scene.addTorus({0.0f, 1.5f, 8.0f}, {0.0f, 1.0f, 0.0f}, 1.0f, 0.3f, 5);
+    // Metal torus standing up
+    scene.addTorus({-4.0f, 1.2f, 6.0f}, {1.0f, 0.0f, 0.0f}, 0.8f, 0.25f, 4);
+    // Dichroic torus
+    scene.addTorus({4.0f, 1.0f, 7.0f}, {0.0f, 0.707f, 0.707f}, 0.7f, 0.2f, 9);
 
     // ROYGBIV rainbow
     const float roygbivRadius = 0.5f;

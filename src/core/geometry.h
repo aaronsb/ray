@@ -7,8 +7,9 @@ enum class GeometryType : uint32_t {
     Sphere = 0,
     Box = 1,
     Cylinder = 2,
-    Cone = 3
-    // Future: Torus, VoxelChunk, TriangleMesh (see ADR-004)
+    Cone = 3,
+    Torus = 4
+    // Future: VoxelChunk, TriangleMesh (see ADR-004)
 };
 
 // GPU sphere - 32 bytes, 16-byte aligned
@@ -48,4 +49,15 @@ struct alignas(16) Cone {
     float height;
     uint32_t materialId;
     uint32_t cap;          // 0 = no base cap, 1 = cap (default)
+};
+
+// GPU torus - 48 bytes, 16-byte aligned
+// Defined by center, axis (normal to ring plane), major and minor radii
+struct alignas(16) Torus {
+    Vec3 center;           // 16 bytes (padded) - center of the torus
+    Vec3 axis;             // 16 bytes (padded) - normalized, points through the hole
+    float majorRadius;     // distance from center to tube center
+    float minorRadius;     // radius of the tube
+    uint32_t materialId;
+    uint32_t _pad;
 };
