@@ -56,11 +56,8 @@ private:
     QVulkanDeviceFunctions* m_devFuncs = nullptr;
 
     // Scene data
+    Scene m_scene;
     OrbitCamera m_camera;
-    std::vector<Sphere> m_spheres;
-    std::vector<Box> m_boxes;
-    std::vector<SpotLight> m_spotLights;
-    std::vector<Material> m_materials;
 
     // Vulkan resources
     VkPipeline m_computePipeline = VK_NULL_HANDLE;

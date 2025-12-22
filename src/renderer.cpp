@@ -12,13 +12,8 @@
 
 RayTracingRenderer::RayTracingRenderer(QVulkanWindow* window)
     : m_window(window)
+    , m_scene(createTestScene())
 {
-    auto scene = createTestScene();
-    m_spheres = std::move(scene.spheres);
-    m_boxes = std::move(scene.boxes);
-    m_spotLights = std::move(scene.spotLights);
-    m_materials = std::move(scene.materials);
-
     m_camera.distance = 12.0f;
     m_camera.elevation = 0.4f;
     m_camera.target = {0, 1.5f, 0};
@@ -214,10 +209,15 @@ void RayTracingRenderer::createStorageImages() {
 }
 
 void RayTracingRenderer::createSceneBuffers() {
-    VkDeviceSize sphereSize = sizeof(Sphere) * m_spheres.size();
-    VkDeviceSize boxSize = sizeof(Box) * std::max(m_boxes.size(), size_t(1));  // At least 1 to avoid 0-size buffer
-    VkDeviceSize spotLightSize = sizeof(SpotLight) * std::max(m_spotLights.size(), size_t(1));
-    VkDeviceSize materialSize = sizeof(Material) * m_materials.size();
+    const auto& spheres = m_scene.spheres();
+    const auto& boxes = m_scene.boxes();
+    const auto& spotLights = m_scene.spotLights();
+    const auto& materials = m_scene.materials();
+
+    VkDeviceSize sphereSize = sizeof(Sphere) * spheres.size();
+    VkDeviceSize boxSize = sizeof(Box) * std::max(boxes.size(), size_t(1));  // At least 1 to avoid 0-size buffer
+    VkDeviceSize spotLightSize = sizeof(SpotLight) * std::max(spotLights.size(), size_t(1));
+    VkDeviceSize materialSize = sizeof(Material) * materials.size();
     VkDeviceSize cameraSize = sizeof(CameraData);
 
     createBuffer(sphereSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
@@ -245,23 +245,23 @@ void RayTracingRenderer::createSceneBuffers() {
     void* data;
 
     m_devFuncs->vkMapMemory(dev, m_sphereBufferMemory, 0, sphereSize, 0, &data);
-    memcpy(data, m_spheres.data(), sphereSize);
+    memcpy(data, spheres.data(), sphereSize);
     m_devFuncs->vkUnmapMemory(dev, m_sphereBufferMemory);
 
-    if (!m_boxes.empty()) {
+    if (!boxes.empty()) {
         m_devFuncs->vkMapMemory(dev, m_boxBufferMemory, 0, boxSize, 0, &data);
-        memcpy(data, m_boxes.data(), sizeof(Box) * m_boxes.size());
+        memcpy(data, boxes.data(), sizeof(Box) * boxes.size());
         m_devFuncs->vkUnmapMemory(dev, m_boxBufferMemory);
     }
 
-    if (!m_spotLights.empty()) {
+    if (!spotLights.empty()) {
         m_devFuncs->vkMapMemory(dev, m_spotLightBufferMemory, 0, spotLightSize, 0, &data);
-        memcpy(data, m_spotLights.data(), sizeof(SpotLight) * m_spotLights.size());
+        memcpy(data, spotLights.data(), sizeof(SpotLight) * spotLights.size());
         m_devFuncs->vkUnmapMemory(dev, m_spotLightBufferMemory);
     }
 
     m_devFuncs->vkMapMemory(dev, m_materialBufferMemory, 0, materialSize, 0, &data);
-    memcpy(data, m_materials.data(), materialSize);
+    memcpy(data, materials.data(), materialSize);
     m_devFuncs->vkUnmapMemory(dev, m_materialBufferMemory);
 
     // Keep camera buffer mapped for updates each frame
@@ -528,9 +528,9 @@ void RayTracingRenderer::recordComputeCommands(VkCommandBuffer cmdBuf, bool isSt
     pc.frameIndex = m_frameIndex;
     pc.sampleCount = static_cast<uint32_t>(m_smoothedSamples);
     pc.maxBounces = 5;
-    pc.sphereCount = static_cast<uint32_t>(m_spheres.size());
-    pc.boxCount = static_cast<uint32_t>(m_boxes.size());
-    pc.spotLightCount = static_cast<uint32_t>(m_spotLights.size());
+    pc.sphereCount = m_scene.sphereCount();
+    pc.boxCount = m_scene.boxCount();
+    pc.spotLightCount = m_scene.spotLightCount();
     pc.width = sz.width();
     pc.height = sz.height();
     pc.useNEE = 1;
@@ -794,12 +794,13 @@ void RayTracingWindow::wheelEvent(QWheelEvent* event) {
 }
 
 void RayTracingRenderer::cycleGobos(int direction) {
-    if (m_spotLights.empty()) return;
+    auto& spotLights = m_scene.spotLightsMut();
+    if (spotLights.empty()) return;
 
     constexpr uint32_t numGoboTypes = 7;  // None, Stripes, Grid, Circles, Dots, Star, Off
 
     // Cycle all spotlights together
-    for (auto& light : m_spotLights) {
+    for (auto& light : spotLights) {
         int newType = static_cast<int>(light.goboType) + direction;
         if (newType < 0) newType = numGoboTypes - 1;
         if (newType >= static_cast<int>(numGoboTypes)) newType = 0;
@@ -808,10 +809,10 @@ void RayTracingRenderer::cycleGobos(int direction) {
 
     // Re-upload spotlight buffer
     VkDevice dev = m_window->device();
-    VkDeviceSize size = sizeof(SpotLight) * m_spotLights.size();
+    VkDeviceSize size = sizeof(SpotLight) * spotLights.size();
     void* data;
     m_devFuncs->vkMapMemory(dev, m_spotLightBufferMemory, 0, size, 0, &data);
-    memcpy(data, m_spotLights.data(), size);
+    memcpy(data, spotLights.data(), size);
     m_devFuncs->vkUnmapMemory(dev, m_spotLightBufferMemory);
 
     markCameraMotion();  // Reset accumulation to see change immediately
