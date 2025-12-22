@@ -300,18 +300,38 @@ bool scatter(Ray rIn, HitRecord rec, out vec3 attenuation, out Ray scattered) {
         return dot(scattered.direction, rec.normal) > 0.0;
     }
     else if (mat.type == 6) {
-        // Dichroic (color-shifting based on view angle)
-        // Like thin-film interference (oil slick, soap bubbles)
+        // Thin-film interference (soap bubbles, oil slicks, beetle shells)
         vec3 scatterDir = rec.normal + randomUnitVector();
         if (dot(scatterDir, scatterDir) < EPSILON)
             scatterDir = rec.normal;
         scattered = Ray(rec.point, normalize(scatterDir));
 
-        // Interpolate between albedo and emission based on viewing angle
-        float cosAngle = abs(dot(normalize(rIn.direction), rec.normal));
-        // Use a sine-based interference pattern for more color shifting
-        float shift = 0.5 + 0.5 * sin(cosAngle * PI * mat.param);
-        attenuation = mix(mat.albedo, mat.emission, shift);
+        // Thin-film physics:
+        // Path difference = 2 * n * d * cos(theta_refracted)
+        // Interference creates color based on which wavelengths match
+        float cosTheta = abs(dot(normalize(rIn.direction), rec.normal));
+        float filmIOR = 1.4;  // Typical thin film (soap, oil)
+        float sinTheta2 = 1.0 - cosTheta * cosTheta;
+        float cosRefracted = sqrt(1.0 - sinTheta2 / (filmIOR * filmIOR));
+
+        // Film thickness in nm (param), scaled for visible spectrum
+        float thickness = mat.param;  // e.g., 300-800nm for visible colors
+        float pathDiff = 2.0 * filmIOR * thickness * cosRefracted;
+
+        // Calculate interference for RGB wavelengths
+        // Red ~650nm, Green ~550nm, Blue ~450nm
+        vec3 wavelengths = vec3(650.0, 550.0, 450.0);
+
+        // Phase difference (in cycles) for each wavelength
+        vec3 phase = pathDiff / wavelengths;
+
+        // Interference intensity: cos^2 gives 0-1 for destructive-constructive
+        vec3 interference = 0.5 + 0.5 * cos(phase * 2.0 * PI);
+
+        // Base reflectivity (Fresnel-ish) + interference coloring
+        float fresnel = pow(1.0 - cosTheta, 3.0);
+        attenuation = mix(mat.albedo, interference, 0.5 + 0.5 * fresnel);
+
         return true;
     }
 

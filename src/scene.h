@@ -202,8 +202,10 @@ inline std::pair<std::vector<Sphere>, std::vector<Material>> createTestScene() {
     // Material 8: Brushed steel (anisotropic metal)
     materials.push_back({{0.7f, 0.7f, 0.75f}, {0, 0, 0}, (uint32_t)MaterialType::AnisotropicMetal, 0.3f, 0.1f});
 
-    // Material 9: Dichroic (color-shifting: purple to gold)
-    materials.push_back({{0.8f, 0.2f, 0.8f}, {1.0f, 0.8f, 0.2f}, (uint32_t)MaterialType::Dichroic, 3.0f, 0});
+    // Material 9: Thin-film interference (soap bubble / oil slick)
+    // param = film thickness in nm (300-800 for visible colors)
+    // albedo is base color when interference is weak
+    materials.push_back({{0.9f, 0.9f, 0.95f}, {0, 0, 0}, (uint32_t)MaterialType::Dichroic, 400.0f, 0});
 
     // Expanded room (150 unit walls instead of 100)
     const float wallDist = 150.0f;
