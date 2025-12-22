@@ -1,6 +1,6 @@
 # ADR-004: Geometry Primitives
 
-Status: Proposed
+Status: Accepted
 Date: 2025-12-21
 Deciders: @aaron, @claude
 
@@ -28,8 +28,8 @@ Fast, exact intersections via closed-form math. No acceleration structure needed
 | **Sphere** | ✅ Implemented | Quadratic intersection |
 | **Box (AABB)** | ✅ Implemented | Slab method |
 | **Plane** | ✅ Implemented | Ground plane with precision fix |
-| **Cylinder** | Planned | Quadratic + caps |
-| **Cone** | Planned | Quadratic + base cap |
+| **Cylinder** | ✅ Implemented | Quadratic + caps |
+| **Cone** | ✅ Implemented | Quadratic + base cap |
 | **Torus** | Planned | Quartic (can use Newton iteration) |
 | **Disk** | Planned | Plane + radius check |
 
