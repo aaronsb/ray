@@ -1,0 +1,538 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// Output and accumulation images
+layout(rgba8, set = 0, binding = 0) uniform writeonly image2D outputImage;
+layout(rgba32f, set = 0, binding = 1) uniform image2D accumImage;
+
+// Scene data - must match C++ struct layout exactly
+// C++ Vec3 has explicit 4-byte padding, making it 16 bytes
+struct Sphere {
+    vec3 center;
+    float _center_pad;   // C++ Vec3._pad
+    float radius;
+    uint materialId;
+    float _pad[2];
+};  // Total: 32 bytes
+
+struct Material {
+    vec3 albedo;
+    float _pad1;
+    vec3 emission;      // also secondary color for dichroic
+    float _pad2;
+    uint type;          // 0=diffuse, 1=metal, 2=dielectric, 3=emissive, 4=rough dielectric, 5=anisotropic metal, 6=dichroic
+    float param;        // roughness or IOR
+    float param2;       // secondary param (roughness for rough dielectric, anisotropy for brushed)
+    float _pad3;
+};
+
+layout(std430, set = 0, binding = 2) readonly buffer SphereBuffer {
+    Sphere spheres[];
+};
+
+layout(std430, set = 0, binding = 3) readonly buffer MaterialBuffer {
+    Material materials[];
+};
+
+layout(std140, set = 0, binding = 4) uniform CameraUBO {
+    vec3 origin;
+    float _pad1;
+    vec3 lowerLeftCorner;
+    float _pad2;
+    vec3 horizontal;
+    float _pad3;
+    vec3 vertical;
+    float _pad4;
+    vec3 u;
+    float _pad5;
+    vec3 v;
+    float _pad6;
+    vec3 w;
+    float _pad7;           // C++ Vec3._pad for w
+    float lensRadius;      // offset 112 in C++
+    float _padEnd[3];      // C++ _pad[3]
+} camera;
+
+layout(push_constant) uniform PushConstants {
+    uint frameIndex;
+    uint sampleCount;
+    uint maxBounces;
+    uint sphereCount;
+    uint width;
+    uint height;
+    uint useNEE;
+    uint accumulate;  // 0 = single frame (moving), 1 = accumulate (stationary)
+} pc;
+
+// Constants
+const float PI = 3.14159265359;
+const float EPSILON = 0.0001;
+const float T_MAX = 10000.0;
+
+// PCG random number generator state
+uint rngState;
+
+// PCG hash
+uint pcg_hash(uint val) {
+    uint state = val * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+void initRNG(uvec2 pixel, uint frame) {
+    rngState = pcg_hash(pixel.x + pixel.y * pc.width + frame * pc.width * pc.height);
+}
+
+float rand() {
+    rngState = pcg_hash(rngState);
+    return float(rngState) / float(0xFFFFFFFFu);
+}
+
+vec2 rand2() {
+    return vec2(rand(), rand());
+}
+
+vec3 rand3() {
+    return vec3(rand(), rand(), rand());
+}
+
+// Random direction in unit sphere
+vec3 randomInUnitSphere() {
+    vec3 p;
+    do {
+        p = rand3() * 2.0 - 1.0;
+    } while (dot(p, p) >= 1.0);
+    return p;
+}
+
+// Random unit vector (for Lambertian)
+vec3 randomUnitVector() {
+    float z = rand() * 2.0 - 1.0;
+    float a = rand() * 2.0 * PI;
+    float r = sqrt(1.0 - z * z);
+    return vec3(r * cos(a), r * sin(a), z);
+}
+
+// Random in hemisphere
+vec3 randomInHemisphere(vec3 normal) {
+    vec3 inUnitSphere = randomInUnitSphere();
+    if (dot(inUnitSphere, normal) > 0.0)
+        return inUnitSphere;
+    else
+        return -inUnitSphere;
+}
+
+// Ray structure
+struct Ray {
+    vec3 origin;
+    vec3 direction;
+};
+
+vec3 rayAt(Ray r, float t) {
+    return r.origin + t * r.direction;
+}
+
+// Hit record
+struct HitRecord {
+    vec3 point;
+    vec3 normal;
+    float t;
+    uint materialId;
+    bool frontFace;
+};
+
+void setFaceNormal(inout HitRecord rec, Ray r, vec3 outwardNormal) {
+    rec.frontFace = dot(r.direction, outwardNormal) < 0.0;
+    rec.normal = rec.frontFace ? outwardNormal : -outwardNormal;
+}
+
+// Sphere intersection
+bool hitSphere(Sphere sphere, Ray r, float tMin, float tMax, inout HitRecord rec) {
+    vec3 oc = r.origin - sphere.center;
+    float a = dot(r.direction, r.direction);
+    float halfB = dot(oc, r.direction);
+    float c = dot(oc, oc) - sphere.radius * sphere.radius;
+
+    float discriminant = halfB * halfB - a * c;
+    if (discriminant < 0.0) return false;
+
+    float sqrtD = sqrt(discriminant);
+    float root = (-halfB - sqrtD) / a;
+    if (root < tMin || root > tMax) {
+        root = (-halfB + sqrtD) / a;
+        if (root < tMin || root > tMax)
+            return false;
+    }
+
+    rec.t = root;
+    rec.point = rayAt(r, root);
+    vec3 outwardNormal = (rec.point - sphere.center) / sphere.radius;
+    setFaceNormal(rec, r, outwardNormal);
+    rec.materialId = sphere.materialId;
+
+    return true;
+}
+
+// Scene intersection
+bool hitScene(Ray r, float tMin, float tMax, inout HitRecord rec) {
+    HitRecord tempRec;
+    bool hitAnything = false;
+    float closestSoFar = tMax;
+
+    for (uint i = 0; i < pc.sphereCount; i++) {
+        if (hitSphere(spheres[i], r, tMin, closestSoFar, tempRec)) {
+            hitAnything = true;
+            closestSoFar = tempRec.t;
+            rec = tempRec;
+        }
+    }
+
+    return hitAnything;
+}
+
+// Schlick approximation for Fresnel
+float schlick(float cosine, float refIdx) {
+    float r0 = (1.0 - refIdx) / (1.0 + refIdx);
+    r0 = r0 * r0;
+    return r0 + (1.0 - r0) * pow(1.0 - cosine, 5.0);
+}
+
+// Custom refract (avoiding name conflict with builtin)
+vec3 refractRay(vec3 uv, vec3 n, float etaiOverEtat) {
+    float cosTheta = min(dot(-uv, n), 1.0);
+    vec3 rOutPerp = etaiOverEtat * (uv + cosTheta * n);
+    vec3 rOutParallel = -sqrt(abs(1.0 - dot(rOutPerp, rOutPerp))) * n;
+    return rOutPerp + rOutParallel;
+}
+
+// Material scattering
+bool scatter(Ray rIn, HitRecord rec, out vec3 attenuation, out Ray scattered) {
+    Material mat = materials[rec.materialId];
+
+    if (mat.type == 0) {
+        // Diffuse (Lambertian)
+        vec3 scatterDir = rec.normal + randomUnitVector();
+        if (dot(scatterDir, scatterDir) < EPSILON)
+            scatterDir = rec.normal;
+        scattered = Ray(rec.point, normalize(scatterDir));
+        attenuation = mat.albedo;
+        return true;
+    }
+    else if (mat.type == 1) {
+        // Metal
+        vec3 reflected = reflect(normalize(rIn.direction), rec.normal);
+        reflected += mat.param * randomInUnitSphere(); // roughness
+        scattered = Ray(rec.point, normalize(reflected));
+        attenuation = mat.albedo;
+        return dot(scattered.direction, rec.normal) > 0.0;
+    }
+    else if (mat.type == 2) {
+        // Dielectric (glass)
+        attenuation = vec3(1.0);
+        float refractionRatio = rec.frontFace ? (1.0 / mat.param) : mat.param;
+
+        vec3 unitDir = normalize(rIn.direction);
+        float cosTheta = min(dot(-unitDir, rec.normal), 1.0);
+        float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+
+        bool cannotRefract = refractionRatio * sinTheta > 1.0;
+        vec3 direction;
+
+        if (cannotRefract || schlick(cosTheta, refractionRatio) > rand())
+            direction = reflect(unitDir, rec.normal);
+        else
+            direction = refractRay(unitDir, rec.normal, refractionRatio);
+
+        scattered = Ray(rec.point, direction);
+        return true;
+    }
+    else if (mat.type == 3) {
+        // Emissive - no scattering
+        return false;
+    }
+    else if (mat.type == 4) {
+        // Rough Dielectric (frosted glass)
+        // Like dielectric but with roughness perturbation
+        attenuation = vec3(1.0);
+        float refractionRatio = rec.frontFace ? (1.0 / mat.param) : mat.param;
+
+        vec3 unitDir = normalize(rIn.direction);
+        float cosTheta = min(dot(-unitDir, rec.normal), 1.0);
+        float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+
+        bool cannotRefract = refractionRatio * sinTheta > 1.0;
+        vec3 direction;
+
+        if (cannotRefract || schlick(cosTheta, refractionRatio) > rand())
+            direction = reflect(unitDir, rec.normal);
+        else
+            direction = refractRay(unitDir, rec.normal, refractionRatio);
+
+        // Add roughness perturbation (frosted effect)
+        direction = normalize(direction + mat.param2 * randomInUnitSphere());
+
+        scattered = Ray(rec.point, direction);
+        return true;
+    }
+    else if (mat.type == 5) {
+        // Anisotropic Metal (brushed steel)
+        // Roughness is stretched in one direction
+        vec3 reflected = reflect(normalize(rIn.direction), rec.normal);
+
+        // Create tangent frame (brushed direction along surface)
+        vec3 tangent = normalize(cross(rec.normal, vec3(0.0, 1.0, 0.0)));
+        if (length(tangent) < 0.001)
+            tangent = normalize(cross(rec.normal, vec3(1.0, 0.0, 0.0)));
+        vec3 bitangent = cross(rec.normal, tangent);
+
+        // Anisotropic roughness: more blur along tangent, less along bitangent
+        float roughT = mat.param;                    // roughness along tangent (brush direction)
+        float roughB = mat.param * mat.param2;       // roughness perpendicular (param2 = anisotropy ratio)
+
+        vec2 rnd = rand2();
+        vec3 perturbation = tangent * (rnd.x * 2.0 - 1.0) * roughT +
+                           bitangent * (rnd.y * 2.0 - 1.0) * roughB;
+
+        reflected = normalize(reflected + perturbation);
+        scattered = Ray(rec.point, reflected);
+        attenuation = mat.albedo;
+        return dot(scattered.direction, rec.normal) > 0.0;
+    }
+    else if (mat.type == 6) {
+        // Dichroic (color-shifting based on view angle)
+        // Like thin-film interference (oil slick, soap bubbles)
+        vec3 scatterDir = rec.normal + randomUnitVector();
+        if (dot(scatterDir, scatterDir) < EPSILON)
+            scatterDir = rec.normal;
+        scattered = Ray(rec.point, normalize(scatterDir));
+
+        // Interpolate between albedo and emission based on viewing angle
+        float cosAngle = abs(dot(normalize(rIn.direction), rec.normal));
+        // Use a sine-based interference pattern for more color shifting
+        float shift = 0.5 + 0.5 * sin(cosAngle * PI * mat.param);
+        attenuation = mix(mat.albedo, mat.emission, shift);
+        return true;
+    }
+
+    return false;
+}
+
+// Light sampling for NEE (Next Event Estimation)
+// Returns light position and emission for the emissive sphere
+void sampleLight(out vec3 lightPos, out vec3 lightEmission, out float lightRadius) {
+    // Find emissive sphere (material type 3)
+    for (uint i = 0; i < pc.sphereCount; i++) {
+        Material mat = materials[spheres[i].materialId];
+        if (mat.type == 3) { // Emissive
+            lightPos = spheres[i].center;
+            lightRadius = spheres[i].radius;
+            lightEmission = mat.emission;
+            return;
+        }
+    }
+    // Fallback
+    lightPos = vec3(0, 8, 0);
+    lightRadius = 1.0;
+    lightEmission = vec3(15.0);
+}
+
+// Sample random point on sphere surface
+vec3 sampleSpherePoint(vec3 center, float radius) {
+    vec3 dir = randomUnitVector();
+    return center + dir * radius;
+}
+
+// Check if ray hits anything before maxDist
+bool shadowRay(vec3 origin, vec3 dir, float maxDist) {
+    Ray ray = Ray(origin, dir);
+    HitRecord rec;
+    if (hitScene(ray, EPSILON, maxDist - EPSILON, rec)) {
+        // Hit something - but is it the light itself?
+        Material mat = materials[rec.materialId];
+        if (mat.type == 3) return false; // Hit the light, not shadowed
+        return true; // Hit something else, shadowed
+    }
+    return false; // Nothing hit, light is visible
+}
+
+// Path tracing with Next Event Estimation
+vec3 tracePath(Ray ray) {
+    vec3 radiance = vec3(0.0);
+    vec3 throughput = vec3(1.0);
+    bool lastBounceSpecular = true;  // Camera ray counts as "specular" for emission
+
+    // Get light info once
+    vec3 lightPos, lightEmission;
+    float lightRadius;
+    sampleLight(lightPos, lightEmission, lightRadius);
+
+    for (uint bounce = 0; bounce < pc.maxBounces; bounce++) {
+        HitRecord rec;
+
+        if (!hitScene(ray, EPSILON, T_MAX, rec)) {
+            // Sky gradient
+            vec3 unitDir = normalize(ray.direction);
+            float t = 0.5 * (unitDir.y + 1.0);
+            vec3 skyColor = mix(vec3(1.0), vec3(0.5, 0.7, 1.0), t);
+            radiance += throughput * skyColor * 0.3;
+            break;
+        }
+
+        Material mat = materials[rec.materialId];
+
+        // Add emission when we hit a light
+        // With NEE: only count if we came from a specular bounce (glass/metal)
+        // because NEE only samples for diffuse, specular paths need to find light naturally
+        if (lastBounceSpecular || pc.useNEE == 0) {
+            radiance += throughput * mat.emission;
+        }
+
+        // NEE: Direct light sampling for diffuse surfaces (skip during camera motion for speed)
+        if (pc.useNEE == 1 && mat.type == 0) { // Diffuse only (metals/glass use BRDF sampling)
+            // Sample a point on the light
+            vec3 lightSamplePos = sampleSpherePoint(lightPos, lightRadius);
+            vec3 toLight = lightSamplePos - rec.point;
+            float lightDist = length(toLight);
+            vec3 lightDir = toLight / lightDist;
+
+            float NdotL = dot(rec.normal, lightDir);
+
+            if (NdotL > 0.0 && !shadowRay(rec.point, lightDir, lightDist)) {
+                // Geometry term
+                float lightNdotL = max(0.0, dot(-lightDir, normalize(lightSamplePos - lightPos)));
+                float lightArea = 4.0 * PI * lightRadius * lightRadius;
+                float solidAngle = (lightArea * lightNdotL) / (lightDist * lightDist);
+
+                // BRDF for diffuse = albedo / PI
+                vec3 brdf = mat.albedo / PI;
+
+                // Add direct light contribution (clamped to prevent fireflies)
+                vec3 directLight = throughput * brdf * lightEmission * NdotL * solidAngle;
+                radiance += min(directLight, vec3(10.0));
+            }
+        }
+
+        // Scatter for indirect
+        vec3 attenuation;
+        Ray scattered;
+        if (!scatter(ray, rec, attenuation, scattered)) {
+            break;
+        }
+
+        // Track if this bounce was specular (metal=1, dielectric=2)
+        lastBounceSpecular = (mat.type == 1 || mat.type == 2);
+
+        throughput *= attenuation;
+        ray = scattered;
+
+        // Russian roulette termination
+        if (bounce > 3) {
+            float p = max(throughput.r, max(throughput.g, throughput.b));
+            if (rand() > p) break;
+            throughput /= p;
+        }
+    }
+
+    return radiance;
+}
+
+// Generate camera ray
+Ray getCameraRay(vec2 uv) {
+    vec3 direction = camera.lowerLeftCorner
+                   + uv.x * camera.horizontal
+                   + uv.y * camera.vertical
+                   - camera.origin;
+    return Ray(camera.origin, normalize(direction));
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+
+    if (pixel.x >= int(pc.width) || pixel.y >= int(pc.height))
+        return;
+
+    initRNG(uvec2(pixel), pc.frameIndex);
+
+    // Jittered sample within pixel
+    // Flip Y for Vulkan coordinate system (Y=0 at top)
+    vec2 uv = (vec2(pixel) + rand2()) / vec2(pc.width, pc.height);
+    uv.y = 1.0 - uv.y;
+
+    Ray ray = getCameraRay(uv);
+    vec3 color = tracePath(ray);
+
+    // Clamp to prevent fireflies and handle NaN/inf from extreme values
+    // NaN check: NaN != NaN, so replace with black
+    if (any(isnan(color)) || any(isinf(color))) {
+        color = vec3(0.0);
+    }
+    color = clamp(color, vec3(0.0), vec3(100.0));
+
+    // Hybrid accumulation:
+    // - Moving (accumulate=0): Just current frame (no blur from old camera positions)
+    // - Stationary (accumulate=1): Proper progressive accumulation
+    vec4 prev = imageLoad(accumImage, pixel);
+    vec3 blended;
+
+    if (pc.accumulate == 0) {
+        // Moving: blend with just the previous frame (2-frame average)
+        blended = mix(prev.rgb, color, 0.5);
+    } else if (pc.frameIndex == 0) {
+        // First frame after becoming stationary
+        blended = color;
+    } else {
+        // Proper accumulation when stationary
+        float weight = 1.0 / float(pc.frameIndex + 1);
+        blended = mix(prev.rgb, color, weight);
+    }
+    imageStore(accumImage, pixel, vec4(blended, 1.0));
+
+    // Apply spatial denoise filter during movement
+    vec3 filtered = blended;
+    if (pc.accumulate == 0) {
+        // Edge-aware bilateral filter (3x3)
+        // Weights based on spatial distance and color similarity
+        const float sigmaSpatial = 1.0;
+        const float sigmaColor = 0.1;
+
+        vec3 sum = vec3(0.0);
+        float weightSum = 0.0;
+
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                ivec2 samplePos = pixel + ivec2(dx, dy);
+
+                // Bounds check
+                if (samplePos.x >= 0 && samplePos.x < int(pc.width) &&
+                    samplePos.y >= 0 && samplePos.y < int(pc.height)) {
+
+                    vec3 sampleColor = imageLoad(accumImage, samplePos).rgb;
+
+                    // Spatial weight (Gaussian)
+                    float spatialDist = float(dx * dx + dy * dy);
+                    float spatialWeight = exp(-spatialDist / (2.0 * sigmaSpatial * sigmaSpatial));
+
+                    // Color weight (edge-preserving)
+                    vec3 colorDiff = sampleColor - blended;
+                    float colorDist = dot(colorDiff, colorDiff);
+                    float colorWeight = exp(-colorDist / (2.0 * sigmaColor * sigmaColor));
+
+                    float weight = spatialWeight * colorWeight;
+                    sum += sampleColor * weight;
+                    weightSum += weight;
+                }
+            }
+        }
+
+        filtered = sum / max(weightSum, 0.0001);
+    }
+
+    // Simple Reinhard tone mapping
+    vec3 finalColor = filtered / (filtered + vec3(1.0));
+
+    // Gamma correction
+    finalColor = pow(finalColor, vec3(1.0 / 2.2));
+
+    imageStore(outputImage, pixel, vec4(finalColor, 1.0));
+}
