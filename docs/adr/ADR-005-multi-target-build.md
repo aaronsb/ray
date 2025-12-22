@@ -1,6 +1,6 @@
 # ADR-005: Multi-Target Build System
 
-Status: Proposed
+Status: Accepted
 Date: 2025-12-21
 Deciders: @aaron, @claude
 
