@@ -149,6 +149,10 @@ void RayTracingRenderer::startNextFrame() {
     }
     m_wasStationary = isStationary;
 
+    // Check if converged - stop sampling after 200 frames to let GPU rest
+    constexpr uint32_t convergenceFrames = 200;
+    bool isConverged = isStationary && m_frameIndex > convergenceFrames;
+
     VkDevice dev = m_window->device();
     QSize sz = m_window->swapChainImageSize();
     float aspect = float(sz.width()) / float(sz.height());
@@ -164,7 +168,11 @@ void RayTracingRenderer::startNextFrame() {
     m_frameIndex++;
 
     m_window->frameReady();
-    m_window->requestUpdate();
+
+    // Only request next frame if not converged - lets GPU rest
+    if (!isConverged) {
+        m_window->requestUpdate();
+    }
 }
 
 VkShaderModule RayTracingRenderer::createShaderModule(const QString& path) {
