@@ -46,7 +46,11 @@ enum class MaterialType : uint32_t {
     Emissive = 3,
     RoughDielectric = 4,  // Frosted glass
     AnisotropicMetal = 5, // Brushed steel
-    Dichroic = 6          // Color-shifting
+    Dichroic = 6,         // Thin-film interference
+    Marble = 7,           // Turbulence-based veins
+    Wood = 8,             // Concentric rings with grain
+    Swirl = 9,            // FBM noise pattern
+    Checker = 10          // Checkerboard pattern
 };
 
 // GPU material - 48 bytes, 16-byte aligned
@@ -88,6 +92,9 @@ struct alignas(16) PushConstants {
     uint32_t height;
     uint32_t useNEE;
     uint32_t accumulate;  // 0 = no accumulation (moving), 1 = accumulate (stationary)
+    float sunElevation;   // radians, 0 = horizon, PI/2 = zenith
+    float sunAzimuth;     // radians, angle around Y axis
+    float _pad[2];
 };
 
 // Orbit camera controller
@@ -184,8 +191,8 @@ inline std::pair<std::vector<Sphere>, std::vector<Material>> createTestScene() {
     // Material 2: Green diffuse (right wall)
     materials.push_back({{0.12f, 0.45f, 0.15f}, {0, 0, 0}, (uint32_t)MaterialType::Diffuse, 0, 0});
 
-    // Material 3: Emissive (light)
-    materials.push_back({{1, 1, 1}, {15, 15, 15}, (uint32_t)MaterialType::Emissive, 0, 0});
+    // Material 3: Emissive (light) - sun is VERY bright (~100k lux vs ~10k sky)
+    materials.push_back({{1, 1, 1}, {5000, 4700, 4000}, (uint32_t)MaterialType::Emissive, 0, 0});
 
     // Material 4: Metal sphere (slightly rough)
     materials.push_back({{0.8f, 0.8f, 0.9f}, {0, 0, 0}, (uint32_t)MaterialType::Metal, 0.05f, 0});
@@ -193,8 +200,8 @@ inline std::pair<std::vector<Sphere>, std::vector<Material>> createTestScene() {
     // Material 5: Glass sphere (clear)
     materials.push_back({{1, 1, 1}, {0, 0, 0}, (uint32_t)MaterialType::Dielectric, 1.5f, 0});
 
-    // Material 6: Blue diffuse
-    materials.push_back({{0.2f, 0.3f, 0.8f}, {0, 0, 0}, (uint32_t)MaterialType::Diffuse, 0, 0});
+    // Material 6: White diffuse (for white balance reference)
+    materials.push_back({{0.9f, 0.9f, 0.9f}, {0, 0, 0}, (uint32_t)MaterialType::Diffuse, 0, 0});
 
     // Material 7: Frosted glass (rough dielectric)
     materials.push_back({{1, 1, 1}, {0, 0, 0}, (uint32_t)MaterialType::RoughDielectric, 1.5f, 0.15f});
@@ -207,27 +214,29 @@ inline std::pair<std::vector<Sphere>, std::vector<Material>> createTestScene() {
     // albedo is base color when interference is weak
     materials.push_back({{0.9f, 0.9f, 0.95f}, {0, 0, 0}, (uint32_t)MaterialType::Dichroic, 400.0f, 0});
 
-    // Expanded room (150 unit walls instead of 100)
-    const float wallDist = 150.0f;
+    // Material 10: Green Marble (deep teal-green base, white veins + gold)
+    // param = noise scale, albedo = base, emission = vein color
+    materials.push_back({{0.0f, 0.25f, 0.2f}, {0.95f, 0.98f, 0.95f}, (uint32_t)MaterialType::Marble, 8.0f, 0});
+
+    // Material 11: Wood / Baltic Birch (light wood with dark rings)
+    // param = ring density, albedo = light wood, emission = dark grain
+    materials.push_back({{0.9f, 0.75f, 0.55f}, {0.5f, 0.3f, 0.15f}, (uint32_t)MaterialType::Wood, 12.0f, 0});
+
+    // Material 12: Swirl / Jupiter-like (cream and rust bands)
+    // param = pattern scale
+    materials.push_back({{0.98f, 0.92f, 0.8f}, {0.7f, 0.3f, 0.1f}, (uint32_t)MaterialType::Swirl, 2.5f, 0});
+
+    // Material 13: Checker floor (white and dark gray)
+    // param = checker scale, albedo = color1, emission = color2
+    materials.push_back({{0.9f, 0.9f, 0.9f}, {0.2f, 0.2f, 0.2f}, (uint32_t)MaterialType::Checker, 1.0f, 0});
+
+    // Ground plane (checker pattern) - large sphere acts as floor
+    // (Note: shader uses hitGroundPlane() instead, this is skipped)
     const float wallRadius = 142.0f;
+    spheres.push_back({{0, -wallRadius, 0}, wallRadius, 13});
 
-    // Ground plane
-    spheres.push_back({{0, -wallRadius, 0}, wallRadius, 0});
-
-    // Back wall
-    spheres.push_back({{0, 0, -(wallDist + wallRadius - 8)}, wallRadius, 0});
-
-    // Left wall (red)
-    spheres.push_back({{-(wallDist - 8 + wallRadius), 0, 0}, wallRadius, 1});
-
-    // Right wall (green)
-    spheres.push_back({{(wallDist - 8 + wallRadius), 0, 0}, wallRadius, 2});
-
-    // Ceiling
-    spheres.push_back({{0, wallDist - 8 + wallRadius, 0}, wallRadius, 0});
-
-    // Light (emissive sphere in ceiling)
-    spheres.push_back({{0, 7.9f, 0}, 1.5f, 3});
+    // Sun is now in the sky shader, not a physical sphere
+    // Emissive spheres in the scene will still emit light
 
     // Original spheres (front row)
     // Metal sphere (polished)
@@ -236,18 +245,28 @@ inline std::pair<std::vector<Sphere>, std::vector<Material>> createTestScene() {
     // Glass sphere (clear)
     spheres.push_back({{0, 1.0f, 2}, 1.0f, 5});
 
-    // Blue diffuse sphere
+    // White diffuse sphere (white balance reference)
     spheres.push_back({{2.5f, 1.0f, 2}, 1.0f, 6});
 
-    // New materials (back row)
+    // Second row - special materials
     // Frosted glass
     spheres.push_back({{-2.5f, 1.0f, -1}, 1.0f, 7});
 
     // Brushed steel
     spheres.push_back({{0, 1.0f, -1}, 1.0f, 8});
 
-    // Dichroic
+    // Dichroic / thin-film
     spheres.push_back({{2.5f, 1.0f, -1}, 1.0f, 9});
+
+    // Third row - noise-based procedural materials
+    // Marble
+    spheres.push_back({{-2.5f, 1.0f, -4}, 1.0f, 10});
+
+    // Wood
+    spheres.push_back({{0, 1.0f, -4}, 1.0f, 11});
+
+    // Swirl
+    spheres.push_back({{2.5f, 1.0f, -4}, 1.0f, 12});
 
     return {spheres, materials};
 }

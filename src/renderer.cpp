@@ -437,6 +437,8 @@ void RayTracingRenderer::recordComputeCommands(VkCommandBuffer cmdBuf, bool isSt
     pc.height = sz.height();
     pc.useNEE = 1;
     pc.accumulate = isStationary ? 1 : 0;  // Proper accumulation when still, rolling avg when moving
+    pc.sunElevation = m_sunElevation;
+    pc.sunAzimuth = m_sunAzimuth;
 
     m_devFuncs->vkCmdPushConstants(cmdBuf, m_pipelineLayout,
         VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PushConstants), &pc);
@@ -693,19 +695,139 @@ void RayTracingWindow::wheelEvent(QWheelEvent* event) {
     }
 }
 
+bool RayTracingRenderer::saveScreenshot(const QString& filename) {
+    VkDevice dev = m_window->device();
+    uint32_t width = m_window->swapChainImageSize().width();
+    uint32_t height = m_window->swapChainImageSize().height();
+
+    // Wait for any in-flight rendering to complete
+    m_devFuncs->vkDeviceWaitIdle(dev);
+
+    // Create staging buffer
+    VkDeviceSize bufferSize = width * height * 4;
+    VkBuffer stagingBuffer;
+    VkDeviceMemory stagingMemory;
+    createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 stagingBuffer, stagingMemory);
+
+    // Create a temporary command pool and buffer
+    VkCommandPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolInfo.queueFamilyIndex = m_window->graphicsQueueFamilyIndex();
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+
+    VkCommandPool cmdPool;
+    if (m_devFuncs->vkCreateCommandPool(dev, &poolInfo, nullptr, &cmdPool) != VK_SUCCESS) {
+        qWarning("Failed to create command pool for screenshot");
+        m_devFuncs->vkDestroyBuffer(dev, stagingBuffer, nullptr);
+        m_devFuncs->vkFreeMemory(dev, stagingMemory, nullptr);
+        return false;
+    }
+
+    VkCommandBufferAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocInfo.commandPool = cmdPool;
+    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocInfo.commandBufferCount = 1;
+
+    VkCommandBuffer cmdBuf;
+    if (m_devFuncs->vkAllocateCommandBuffers(dev, &allocInfo, &cmdBuf) != VK_SUCCESS) {
+        qWarning("Failed to allocate command buffer for screenshot");
+        m_devFuncs->vkDestroyCommandPool(dev, cmdPool, nullptr);
+        m_devFuncs->vkDestroyBuffer(dev, stagingBuffer, nullptr);
+        m_devFuncs->vkFreeMemory(dev, stagingMemory, nullptr);
+        return false;
+    }
+
+    // Begin command buffer
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    m_devFuncs->vkBeginCommandBuffer(cmdBuf, &beginInfo);
+
+    // Transition storage image for transfer (it's in GENERAL layout)
+    transitionImageLayout(cmdBuf, m_storageImage,
+                          VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                          VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+    // Copy image to buffer
+    VkBufferImageCopy region{};
+    region.bufferOffset = 0;
+    region.bufferRowLength = 0;
+    region.bufferImageHeight = 0;
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.mipLevel = 0;
+    region.imageSubresource.baseArrayLayer = 0;
+    region.imageSubresource.layerCount = 1;
+    region.imageOffset = {0, 0, 0};
+    region.imageExtent = {width, height, 1};
+
+    m_devFuncs->vkCmdCopyImageToBuffer(cmdBuf, m_storageImage,
+                                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                        stagingBuffer, 1, &region);
+
+    // Transition back to general
+    transitionImageLayout(cmdBuf, m_storageImage,
+                          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
+                          VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+                          VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
+    // End and submit command buffer
+    m_devFuncs->vkEndCommandBuffer(cmdBuf);
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &cmdBuf;
+
+    VkQueue queue = m_window->graphicsQueue();
+    m_devFuncs->vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
+    m_devFuncs->vkQueueWaitIdle(queue);
+
+    // Map and read
+    void* data;
+    m_devFuncs->vkMapMemory(dev, stagingMemory, 0, bufferSize, 0, &data);
+
+    // Create QImage - storage image is RGBA8
+    QImage image(width, height, QImage::Format_RGBA8888);
+    memcpy(image.bits(), data, bufferSize);
+
+    m_devFuncs->vkUnmapMemory(dev, stagingMemory);
+
+    // Cleanup
+    m_devFuncs->vkDestroyCommandPool(dev, cmdPool, nullptr);
+    m_devFuncs->vkDestroyBuffer(dev, stagingBuffer, nullptr);
+    m_devFuncs->vkFreeMemory(dev, stagingMemory, nullptr);
+
+    return image.save(filename);
+}
+
 void RayTracingWindow::keyPressEvent(QKeyEvent* event) {
     if (event->key() == Qt::Key_Escape) {
         close();
     } else if (event->key() == Qt::Key_R && m_renderer) {
         m_renderer->resetAccumulation();
-    } else if (event->key() == Qt::Key_S) {
+    } else if (event->key() == Qt::Key_S && m_renderer) {
         QString filename = QString("raytrace_%1.png")
             .arg(QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss"));
-        QImage image = grab().convertToFormat(QImage::Format_RGBA8888);
-        // Swap R and B channels (Vulkan uses BGR internally on some setups)
-        image = image.rgbSwapped();
-        if (image.save(filename)) {
-            qDebug("Saved screenshot: %s (%dx%d)", qPrintable(filename), image.width(), image.height());
+        if (m_renderer->saveScreenshot(filename)) {
+            qDebug("Saved screenshot: %s", qPrintable(filename));
+        } else {
+            qWarning("Failed to save screenshot");
         }
+    } else if (event->key() == Qt::Key_BracketLeft && m_renderer) {
+        // [ - rotate sun counterclockwise (azimuth)
+        m_renderer->adjustSunAzimuth(-0.1f);
+    } else if (event->key() == Qt::Key_BracketRight && m_renderer) {
+        // ] - rotate sun clockwise (azimuth)
+        m_renderer->adjustSunAzimuth(0.1f);
+    } else if (event->key() == Qt::Key_BraceLeft && m_renderer) {
+        // { - lower sun (elevation)
+        m_renderer->adjustSunElevation(-0.1f);
+    } else if (event->key() == Qt::Key_BraceRight && m_renderer) {
+        // } - raise sun (elevation)
+        m_renderer->adjustSunElevation(0.1f);
     }
 }

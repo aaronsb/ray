@@ -20,9 +20,30 @@ public:
     void resetAccumulation() { m_frameIndex = 0; }
     void markCameraMotion() { m_lastMotionNs = m_frameTimer.nsecsElapsed(); }
 
+    // Sun control - full 360 degree sweep for both axes
+    void adjustSunAzimuth(float delta) {
+        m_sunAzimuth += delta;
+        const float TWO_PI = 6.28318530718f;
+        if (m_sunAzimuth < 0.0f) m_sunAzimuth += TWO_PI;
+        if (m_sunAzimuth >= TWO_PI) m_sunAzimuth -= TWO_PI;
+        markCameraMotion();
+    }
+    void adjustSunElevation(float delta) {
+        m_sunElevation += delta;
+        const float TWO_PI = 6.28318530718f;
+        if (m_sunElevation < 0.0f) m_sunElevation += TWO_PI;
+        if (m_sunElevation >= TWO_PI) m_sunElevation -= TWO_PI;
+        markCameraMotion();
+    }
+    float sunElevation() const { return m_sunElevation; }
+    float sunAzimuth() const { return m_sunAzimuth; }
+
     // Stats
     float lastFrameTimeMs() const { return m_lastFrameTimeMs; }
     uint32_t frameIndex() const { return m_frameIndex; }
+
+    // Screenshot
+    bool saveScreenshot(const QString& filename);
 
 private:
     QVulkanWindow* m_window;
@@ -69,6 +90,10 @@ private:
     qint64 m_lastFrameNs = 0;
     qint64 m_lastMotionNs = 0;  // When camera last moved
     bool m_wasStationary = false;  // Track state change
+
+    // Sun position (radians)
+    float m_sunElevation = 0.785f;  // ~45 degrees
+    float m_sunAzimuth = 2.356f;    // ~135 degrees (same direction as before)
 
     // Helpers
     VkShaderModule createShaderModule(const QString& path);
