@@ -30,7 +30,7 @@ Fast, exact intersections via closed-form math. No acceleration structure needed
 | **Plane** | ✅ Implemented | Ground plane with precision fix |
 | **Cylinder** | ✅ Implemented | Quadratic + caps |
 | **Cone** | ✅ Implemented | Quadratic + base cap |
-| **Torus** | Planned | Quartic (can use Newton iteration) |
+| **Torus** | ✅ Implemented | Quartic via Newton iteration |
 | **Disk** | Planned | Plane + radius check |
 
 ```cpp
