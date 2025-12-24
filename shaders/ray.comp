@@ -17,7 +17,7 @@ layout(local_size_x = 16, local_size_y = 16) in;
 #define FEATURE_EMISSION        0   // Self-illuminating materials (TODO)
 #define FEATURE_ACCUMULATION    1   // Temporal accumulation (progressive refinement)
 #define FEATURE_JITTER          1   // Subpixel jitter for anti-aliasing
-#define FEATURE_CSG             1   // SDF-based CSG objects
+#define FEATURE_CSG             0   // SDF-based CSG (disabled - use for volumetrics, not hard edges)
 
 #ifndef MAX_BOUNCES
 #define MAX_BOUNCES             4   // Max ray depth (4-8 typical)
@@ -289,9 +289,6 @@ void main() {
     initRNGTemporal(pixel, pc.frameIndex);
     // Adaptive iterations: more for first frames, fewer once accumulating
     g_newtonMaxIter = (pc.frameIndex < 4) ? NEWTON_MAX_ITER : 4;
-#if FEATURE_CSG
-    g_sdfMaxIter = (pc.frameIndex < 4) ? 64 : 32;
-#endif
 #else
     initRNG(pixel);
 #endif
