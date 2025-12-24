@@ -13,7 +13,7 @@ layout(push_constant) uniform PushConstants {
     vec3 camPos;
     uint frameIndex;
     vec3 camTarget;
-    float _pad2;
+    uint numInstances;
 } pc;
 
 // Patch control points: 16 vec4s per patch (w unused, for alignment)
@@ -38,6 +38,47 @@ layout(std430, set = 0, binding = 3) readonly buffer PatchIndexBuffer {
     uint patchIndices[];
 };
 
+// Instance data (must match CPU struct)
+struct BezierInstance {
+    vec3 position;
+    float scale;
+    vec3 rotation;  // Euler angles (radians), applied in XYZ order
+    uint materialId;
+};
+
+layout(std430, set = 0, binding = 4) readonly buffer InstanceBuffer {
+    BezierInstance instances[];
+};
+
+// Rotation functions
+vec3 rotateX(vec3 v, float angle) {
+    float c = cos(angle);
+    float s = sin(angle);
+    return vec3(v.x, c * v.y - s * v.z, s * v.y + c * v.z);
+}
+
+vec3 rotateY(vec3 v, float angle) {
+    float c = cos(angle);
+    float s = sin(angle);
+    return vec3(c * v.x + s * v.z, v.y, -s * v.x + c * v.z);
+}
+
+vec3 rotateZ(vec3 v, float angle) {
+    float c = cos(angle);
+    float s = sin(angle);
+    return vec3(c * v.x - s * v.y, s * v.x + c * v.y, v.z);
+}
+
+// Apply XYZ Euler rotation
+vec3 rotateXYZ(vec3 v, vec3 angles) {
+    return rotateZ(rotateY(rotateX(v, angles.x), angles.y), angles.z);
+}
+
+// Apply inverse (ZYX) rotation
+vec3 rotateXYZInverse(vec3 v, vec3 angles) {
+    return rotateX(rotateY(rotateZ(v, -angles.z), -angles.y), -angles.x);
+}
+
 const float PI = 3.14159265359;
 const float EPSILON = 0.0001;
 const float T_MAX = 1000.0;
@@ -51,13 +92,12 @@ struct Ray {
 };
 
 Ray getCameraRay(vec2 uv) {
-    // Simple perspective camera with aspect ratio
     vec3 forward = normalize(pc.camTarget - pc.camPos);
     vec3 right = normalize(cross(forward, vec3(0, 1, 0)));
     vec3 up = cross(right, forward);
 
     float aspect = float(pc.width) / float(pc.height);
-    float fov = 0.8;  // ~45 degrees
+    float fov = 0.8;
     vec3 dir = normalize(forward + (uv.x - 0.5) * fov * aspect * right + (uv.y - 0.5) * fov * up);
 
     return Ray(pc.camPos, dir);
@@ -72,42 +112,34 @@ uint patchCount(uint nodeIdx) {
     return bvhNodes[nodeIdx].rightOrCount & 0x7FFFFFFFu;
 }
 
-// Check all patches for intersection using BVH acceleration
-// Returns: 0 = miss, 1 = hit, 2 = hit AABB but missed surface (debug)
-int hitTeapotDebug(Ray r, float tMin, float tMax,
-               out float hitT, out vec3 hitN, out float hitU, out float hitV, out uint hitPatch) {
+// Hit test single instance (BVH traversal in local space)
+bool hitInstance(Ray localRay, float tMin, float tMax,
+                 out float hitT, out vec3 hitN, out float hitU, out float hitV) {
     bool hit = false;
-    bool hitAnyAABB = false;
     float closestT = tMax;
 
-    // Stack-based BVH traversal
     uint stack[32];
     int stackPtr = 0;
-    stack[stackPtr++] = 0;  // Start at root
+    stack[stackPtr++] = 0;
 
     while (stackPtr > 0) {
         uint nodeIdx = stack[--stackPtr];
         BVHNode node = bvhNodes[nodeIdx];
 
-        // Test ray against node AABB
         vec3 aabbMin = vec3(node.minX, node.minY, node.minZ);
         vec3 aabbMax = vec3(node.maxX, node.maxY, node.maxZ);
 
-        if (!hitAABB(aabbMin, aabbMax, r.origin, r.direction, tMin, closestT)) {
+        if (!hitAABB(aabbMin, aabbMax, localRay.origin, localRay.direction, tMin, closestT)) {
             continue;
         }
 
         if (isLeaf(nodeIdx)) {
-            hitAnyAABB = true;  // We reached a leaf AABB
-
-            // Test all patches in this leaf
             uint first = node.leftOrFirst;
             uint count = patchCount(nodeIdx);
 
             for (uint i = 0; i < count; i++) {
                 uint patchIdx = patchIndices[first + i];
 
-                // Load control points for this patch
                 vec3 cp[16];
                 for (int j = 0; j < 16; j++) {
                     cp[j] = patchData[patchIdx * 16 + j].xyz;
@@ -115,26 +147,60 @@ int hitTeapotDebug(Ray r, float tMin, float tMax,
 
                 float t, u, v;
                 vec3 n;
-                if (hitBezierPatch(cp, r.origin, r.direction, tMin, closestT, t, u, v, n)) {
+                if (hitBezierPatch(cp, localRay.origin, localRay.direction, tMin, closestT, t, u, v, n)) {
                     hit = true;
                     closestT = t;
                     hitT = t;
                     hitN = n;
                     hitU = u;
                     hitV = v;
-                    hitPatch = patchIdx;
                 }
             }
         } else {
-            // Push children onto stack (push right first so left is processed first)
             stack[stackPtr++] = node.rightOrCount;
             stack[stackPtr++] = node.leftOrFirst;
         }
     }
 
-    if (hit) return 1;
-    if (hitAnyAABB) return 2;  // Hit AABB but missed surface - Newton failed!
-    return 0;
+    return hit;
+}
+
+// Hit test all instances
+bool hitAllInstances(Ray worldRay, float tMin, float tMax,
+                     out float hitT, out vec3 hitN, out uint hitInstanceId) {
+    bool hit = false;
+    float closestT = tMax;
+
+    for (uint i = 0; i < pc.numInstances; i++) {
+        BezierInstance inst = instances[i];
+
+        // Transform ray to instance local space (inverse of instance transform)
+        // Instance transform: scale -> rotate (XYZ) -> translate
+        // Inverse: inverse_translate -> inverse_rotate (ZYX with negated angles) -> inverse_scale
+        Ray localRay;
+        vec3 translated = worldRay.origin - inst.position;
+        localRay.origin = rotateXYZInverse(translated, inst.rotation) / inst.scale;
+        localRay.direction = rotateXYZInverse(worldRay.direction, inst.rotation);
+
+        float localTMax = closestT / inst.scale;  // Adjust tMax for scale
+
+        float t, u, v;
+        vec3 n;
+        if (hitInstance(localRay, tMin / inst.scale, localTMax, t, n, u, v)) {
+            // Transform t back to world space
+            float worldT = t * inst.scale;
+            if (worldT < closestT) {
+                hit = true;
+                closestT = worldT;
+                hitT = worldT;
+                // Transform normal back to world space
+                hitN = rotateXYZ(n, inst.rotation);
+                hitInstanceId = i;
+            }
+        }
+    }
+
+    return hit;
 }
 
 void main() {
@@ -142,24 +208,28 @@ void main() {
     if (pixel.x >= int(pc.width) || pixel.y >= int(pc.height)) return;
 
     vec2 uv = vec2(pixel) / vec2(pc.width, pc.height);
-    uv.y = 1.0 - uv.y;  // Flip Y
+    uv.y = 1.0 - uv.y;
 
     Ray ray = getCameraRay(uv);
 
     vec3 color = vec3(0.1, 0.1, 0.15);  // Background
 
-    float t, u, v;
+    float t;
     vec3 normal;
-    uint patchId;
+    uint instanceId;
 
-    int result = hitTeapotDebug(ray, EPSILON, T_MAX, t, normal, u, v, patchId);
-
-    if (result == 1) {
-        // Normal shading
+    if (hitAllInstances(ray, EPSILON, T_MAX, t, normal, instanceId)) {
         vec3 lightDir = normalize(vec3(1, 2, 1));
         float NdotL = max(dot(normal, lightDir), 0.0);
 
-        vec3 baseColor = vec3(0.8, 0.6, 0.4);  // Ceramic
+        // Vary color by instance
+        vec3 baseColors[4] = vec3[](
+            vec3(0.8, 0.6, 0.4),   // Ceramic
+            vec3(0.4, 0.6, 0.8),   // Blue ceramic
+            vec3(0.6, 0.8, 0.4),   // Green ceramic
+            vec3(0.8, 0.4, 0.6)    // Pink ceramic
+        );
+        vec3 baseColor = baseColors[instanceId % 4];
 
         color = baseColor * (0.2 + 0.8 * NdotL);
 
@@ -169,7 +239,6 @@ void main() {
         color += vec3(0.5) * spec;
     }
 
-    // Gamma correction
     color = pow(clamp(color, 0.0, 1.0), vec3(1.0 / 2.2));
 
     imageStore(outputImage, pixel, vec4(color, 1.0));

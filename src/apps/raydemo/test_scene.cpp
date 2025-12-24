@@ -1,149 +1,63 @@
 #include "test_scene.h"
+#include "../teapot/teapot_patches.h"  // Teapot data (TODO: move to shared location)
+
+// Load teapot patches into parametric::Patch format
+static std::vector<parametric::Patch> loadTeapotPatches() {
+    std::vector<parametric::Patch> patches;
+    patches.reserve(teapot::numPatches);
+    for (int p = 0; p < teapot::numPatches; p++) {
+        parametric::Patch patch;
+        for (int i = 0; i < 16; i++) {
+            int vertIdx = teapot::patches[p][i];
+            patch.cp[i] = parametric::Vec3(
+                teapot::vertices[vertIdx][0],
+                teapot::vertices[vertIdx][1],
+                teapot::vertices[vertIdx][2]
+            );
+        }
+        patches.push_back(patch);
+    }
+    return patches;
+}
 
 Scene createTestScene() {
     Scene scene;
-    constexpr float deg2rad = 3.14159265f / 180.0f;
 
     // === MATERIALS ===
-    // 0: White diffuse
-    scene.addMaterial(MaterialType::Diffuse, {0.73f, 0.73f, 0.73f});
-    // 1: Red diffuse
-    scene.addMaterial(MaterialType::Diffuse, {0.65f, 0.05f, 0.05f});
-    // 2: Green diffuse
-    scene.addMaterial(MaterialType::Diffuse, {0.12f, 0.45f, 0.15f});
-    // 3: Emissive (bright sun-like)
-    scene.addMaterial(MaterialType::Emissive, {1, 1, 1}, {5000, 4700, 4000});
-    // 4: Metal (slightly rough)
-    scene.addMaterial(MaterialType::Metal, {0.8f, 0.8f, 0.9f}, {0,0,0}, 0.05f);
-    // 5: Glass (clear dielectric)
-    scene.addMaterial(MaterialType::Dielectric, {1, 1, 1}, {0,0,0}, 1.5f);
-    // 6: White diffuse (reference)
-    scene.addMaterial(MaterialType::Diffuse, {0.9f, 0.9f, 0.9f});
-    // 7: Frosted glass
-    scene.addMaterial(MaterialType::RoughDielectric, {1, 1, 1}, {0,0,0}, 1.5f, 0.15f);
-    // 8: Perfect mirror
-    scene.addMaterial(MaterialType::Metal, {0.95f, 0.95f, 0.95f}, {0,0,0}, 0.0f);
-    // 9: Dichroic (cyan/green)
-    scene.addMaterial(MaterialType::Dichroic, {0.9f, 0.9f, 0.95f}, {0,0,0}, 0.35f, 0.2f);
-    // 10: Marble
-    scene.addMaterial(MaterialType::Marble, {0.0f, 0.25f, 0.2f}, {0.95f, 0.98f, 0.95f}, 8.0f);
-    // 11: Wood
-    scene.addMaterial(MaterialType::Wood, {0.9f, 0.75f, 0.55f}, {0.5f, 0.3f, 0.15f}, 12.0f);
-    // 12: Swirl
-    scene.addMaterial(MaterialType::Swirl, {0.98f, 0.92f, 0.8f}, {0.7f, 0.3f, 0.1f}, 2.5f);
-    // 13: Checker floor
+    // 0: Checker floor
     scene.addMaterial(MaterialType::Checker, {0.9f, 0.9f, 0.9f}, {0.2f, 0.2f, 0.2f}, 1.0f);
-    // 14: Dichroic red/orange
-    scene.addMaterial(MaterialType::Dichroic, {0.95f, 0.9f, 0.85f}, {0,0,0}, 0.85f, 0.15f);
-    // 15: Dichroic violet/blue
-    scene.addMaterial(MaterialType::Dichroic, {0.85f, 0.9f, 0.95f}, {0,0,0}, 0.1f, 0.1f);
-    // 16: Dichroic broad (soap bubble)
-    scene.addMaterial(MaterialType::Dichroic, {0.95f, 0.95f, 0.95f}, {0,0,0}, 0.5f, 0.6f);
-    // 17-23: ROYGBIV dichroic spectrum
-    scene.addMaterial(MaterialType::Dichroic, {0.95f, 0.95f, 0.95f}, {0,0,0}, 1.0f, 0.1f);    // Red
-    scene.addMaterial(MaterialType::Dichroic, {0.95f, 0.95f, 0.95f}, {0,0,0}, 0.833f, 0.1f);  // Orange
-    scene.addMaterial(MaterialType::Dichroic, {0.95f, 0.95f, 0.95f}, {0,0,0}, 0.667f, 0.1f);  // Yellow
-    scene.addMaterial(MaterialType::Dichroic, {0.95f, 0.95f, 0.95f}, {0,0,0}, 0.5f, 0.1f);    // Green
-    scene.addMaterial(MaterialType::Dichroic, {0.95f, 0.95f, 0.95f}, {0,0,0}, 0.333f, 0.1f);  // Blue
-    scene.addMaterial(MaterialType::Dichroic, {0.95f, 0.95f, 0.95f}, {0,0,0}, 0.167f, 0.1f);  // Indigo
-    scene.addMaterial(MaterialType::Dichroic, {0.95f, 0.95f, 0.95f}, {0,0,0}, 0.0f, 0.1f);    // Violet
+    // 1: Metal
+    scene.addMaterial(MaterialType::Metal, {0.8f, 0.8f, 0.9f}, {0,0,0}, 0.05f);
+    // 2: Glass
+    scene.addMaterial(MaterialType::Dielectric, {1, 1, 1}, {0,0,0}, 1.5f);
+    // 3: Diffuse
+    scene.addMaterial(MaterialType::Diffuse, {0.8f, 0.4f, 0.4f});
+    // 4: Marble
+    scene.addMaterial(MaterialType::Marble, {0.0f, 0.25f, 0.2f}, {0.95f, 0.98f, 0.95f}, 8.0f);
 
-    // === GEOMETRY ===
-    // Ground plane (large sphere with checker)
-    scene.addSphere({0, -142.0f, 0}, 142.0f, 13);
+    // === GEOMETRY: One of each primitive ===
 
-    // Front row
-    scene.addSphere({-2.5f, 1.0f, 2}, 1.0f, 4);   // Metal
-    scene.addSphere({0, 1.0f, 2}, 1.0f, 5);       // Glass
-    scene.addSphere({2.5f, 1.0f, 2}, 1.0f, 6);    // White diffuse
+    // Ground plane (large sphere)
+    scene.addSphere({0, -100.0f, 0}, 100.0f, 0);
 
-    // Second row
-    scene.addSphere({-2.5f, 1.0f, -1}, 1.0f, 7);  // Frosted glass
-    scene.addSphere({0, 1.0f, -1}, 1.0f, 8);      // Mirror
-    scene.addSphere({2.5f, 1.0f, -1}, 1.0f, 9);   // Dichroic
+    // Sphere
+    scene.addSphere({0, 1.0f, 0}, 1.0f, 1);
 
-    // Third row - procedural
-    scene.addSphere({-2.5f, 1.0f, -4}, 1.0f, 10); // Marble
-    scene.addSphere({0, 1.0f, -4}, 1.0f, 11);     // Wood
-    scene.addSphere({2.5f, 1.0f, -4}, 1.0f, 12);  // Swirl
+    // Box
+    scene.addBox({-2.5f, 0.75f, 0}, {0.75f, 0.75f, 0.75f}, 2);
 
-    // Boxes
-    scene.addBox({5.0f, 0.75f, 1.0f}, {0.75f, 0.75f, 0.75f}, 5);   // Glass cube
-    scene.addBox({-5.0f, 0.6f, 0.0f}, {0.6f, 0.6f, 0.6f}, 8);      // Mirror cube
-    scene.addBox({5.5f, 1.0f, -2.5f}, {0.5f, 1.0f, 0.5f}, 7);      // Frosted tall
-    scene.addBox({-4.5f, 0.4f, 2.5f}, {0.4f, 0.4f, 0.4f}, 5);      // Small glass
-    scene.addBox({-5.5f, 0.3f, -3.0f}, {0.8f, 0.3f, 0.8f}, 11);    // Wood pedestal
-    scene.addBox({6.0f, 0.5f, -4.0f}, {0.5f, 0.5f, 1.0f}, 10);     // Marble block
-    scene.addBox({-6.5f, 0.5f, 1.5f}, {0.5f, 0.5f, 0.5f}, 14);     // Red dichroic
-    scene.addBox({6.5f, 0.5f, 1.5f}, {0.5f, 0.5f, 0.5f}, 15);      // Blue dichroic
+    // Cylinder
+    scene.addCylinder({2.5f, 0.0f, 0}, {0.0f, 1.0f, 0.0f}, 0.5f, 2.0f, 3, true);
 
-    // Soap bubble sphere
-    scene.addSphere({0.0f, 0.6f, 4.0f}, 0.6f, 16);
+    // Cone
+    scene.addCone({0, 0.0f, -2.5f}, {0.0f, 1.0f, 0.0f}, 0.6f, 1.5f, 4, true);
 
-    // === CYLINDERS ===
-    // Metal pillar
-    scene.addCylinder({-7.0f, 0.0f, -1.0f}, {0.0f, 1.0f, 0.0f}, 0.3f, 3.0f, 4, true);
-    // Glass tube
-    scene.addCylinder({7.0f, 0.0f, 2.5f}, {0.0f, 1.0f, 0.0f}, 0.4f, 2.0f, 5, true);
-    // Clear glass rod (horizontal)
-    scene.addCylinder({0.0f, 0.5f, 6.5f}, {1.0f, 0.0f, 0.0f}, 0.25f, 4.0f, 5, true);
-    // Frosted horizontal rod
-    scene.addCylinder({-3.0f, 2.0f, -6.0f}, {1.0f, 0.0f, 0.0f}, 0.15f, 6.0f, 7, true);
-    // Wood log
-    scene.addCylinder({4.0f, 0.2f, 4.5f}, {0.707f, 0.0f, 0.707f}, 0.2f, 1.5f, 11, true);
+    // Torus
+    scene.addTorus({0, 1.0f, 2.5f}, {0.0f, 1.0f, 0.0f}, 0.8f, 0.25f, 2);
 
-    // === CONES ===
-    // Metal spike
-    scene.addCone({-7.0f, 3.0f, -1.0f}, {0.0f, 1.0f, 0.0f}, 0.4f, 1.0f, 4, true);
-    // Glass cone
-    scene.addCone({7.0f, 2.0f, 2.5f}, {0.0f, 1.0f, 0.0f}, 0.5f, 1.5f, 5, true);
-    // Marble pyramid on pedestal
-    scene.addCone({-5.5f, 0.6f, -3.0f}, {0.0f, 1.0f, 0.0f}, 0.5f, 1.0f, 10, true);
-    // Dichroic cone
-    scene.addCone({0.0f, 0.0f, -6.5f}, {0.0f, 1.0f, 0.0f}, 0.8f, 2.0f, 9, true);
-
-    // === TORI ===
-    // Glass torus (donut) - great for seeing refraction
-    scene.addTorus({0.0f, 1.5f, 8.0f}, {0.0f, 1.0f, 0.0f}, 1.0f, 0.3f, 5);
-    // Metal torus standing up
-    scene.addTorus({-4.0f, 1.2f, 6.0f}, {1.0f, 0.0f, 0.0f}, 0.8f, 0.25f, 4);
-    // Dichroic torus
-    scene.addTorus({4.0f, 1.0f, 7.0f}, {0.0f, 0.707f, 0.707f}, 0.7f, 0.2f, 9);
-
-    // ROYGBIV rainbow
-    const float roygbivRadius = 0.5f;
-    const float roygbivSpacing = 1.2f;
-    const float roygbivZ = 5.5f;
-    const float roygbivStartX = -3.6f;
-    for (int i = 0; i < 7; i++) {
-        float x = roygbivStartX + i * roygbivSpacing;
-        scene.addSphere({x, roygbivRadius, roygbivZ}, roygbivRadius, 17 + i);
-    }
-
-    // === SPOTLIGHTS ===
-    scene.addSpotLight(
-        {0.0f, 6.0f, 9.0f},
-        {0.0f, -0.4f, -1.0f},
-        {800.0f, 750.0f, 700.0f},
-        20.0f * deg2rad, 35.0f * deg2rad,
-        GoboType::Grid, 3.0f, 0.0f
-    );
-
-    scene.addSpotLight(
-        {-8.0f, 6.0f, 4.0f},
-        {0.6f, -0.6f, -0.3f},
-        {100.0f, 200.0f, 800.0f},
-        10.0f * deg2rad, 20.0f * deg2rad,
-        GoboType::Stripes, 6.0f, 0.785f
-    );
-
-    scene.addSpotLight(
-        {8.0f, 5.0f, -2.0f},
-        {-0.5f, -0.7f, 0.2f},
-        {600.0f, 200.0f, 50.0f},
-        12.0f * deg2rad, 22.0f * deg2rad,
-        GoboType::Circles, 3.0f, 0.0f
-    );
+    // Bezier patch group (teapot)
+    scene.buildBezierGroup(loadTeapotPatches());
+    scene.addBezierInstance(-3.0f, 0.5f, 3.0f, 0.3f, 0.0f, 0.0f, 0.0f, 1);  // Metal teapot
 
     return scene;
 }

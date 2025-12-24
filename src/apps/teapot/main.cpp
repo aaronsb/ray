@@ -1,6 +1,6 @@
 // Utah Teapot - Direct Bezier Patch Ray Tracing
 // No tessellation. Pure mathematical surfaces.
-// De Casteljau subdivision for GPU-friendly sub-patches.
+// BezierPatchGroup handles subdivision and BVH construction.
 
 #include <QApplication>
 #include <QVulkanInstance>
@@ -9,19 +9,21 @@
 #include <vector>
 
 #include "teapot_patches.h"
-#include "bezier_subdiv.h"
 #include "teapot_renderer.h"
 
+using parametric::Vec3;
+using parametric::Patch;
+
 // Convert raw teapot data to Patch structs
-std::vector<bezier::Patch> loadTeapotPatches() {
-    std::vector<bezier::Patch> patches;
+std::vector<Patch> loadTeapotPatches() {
+    std::vector<Patch> patches;
     patches.reserve(teapot::numPatches);
 
     for (int p = 0; p < teapot::numPatches; p++) {
-        bezier::Patch patch;
+        Patch patch;
         for (int i = 0; i < 16; i++) {
             int vertIdx = teapot::patches[p][i];
-            patch.cp[i] = bezier::Vec3(
+            patch.cp[i] = Vec3(
                 teapot::vertices[vertIdx][0],
                 teapot::vertices[vertIdx][1],
                 teapot::vertices[vertIdx][2]
@@ -40,55 +42,24 @@ int main(int argc, char* argv[]) {
 
     // Load original patches
     auto patches = loadTeapotPatches();
-    printf("Original: %zu patches\n", patches.size());
+    printf("Loaded %zu original patches\n", patches.size());
 
-    // Compute bounds of original teapot
-    bezier::Vec3 teapotMin = patches[0].cp[0];
-    bezier::Vec3 teapotMax = patches[0].cp[0];
+    // Compute and display bounds
+    Vec3 boundsMin = patches[0].cp[0];
+    Vec3 boundsMax = patches[0].cp[0];
     for (const auto& p : patches) {
         for (const auto& cp : p.cp) {
-            teapotMin = bezier::Vec3::min(teapotMin, cp);
-            teapotMax = bezier::Vec3::max(teapotMax, cp);
+            boundsMin.x = std::min(boundsMin.x, cp.x);
+            boundsMin.y = std::min(boundsMin.y, cp.y);
+            boundsMin.z = std::min(boundsMin.z, cp.z);
+            boundsMax.x = std::max(boundsMax.x, cp.x);
+            boundsMax.y = std::max(boundsMax.y, cp.y);
+            boundsMax.z = std::max(boundsMax.z, cp.z);
         }
     }
-    printf("Teapot bounds: (%.2f, %.2f, %.2f) to (%.2f, %.2f, %.2f)\n",
-           teapotMin.x, teapotMin.y, teapotMin.z,
-           teapotMax.x, teapotMax.y, teapotMax.z);
-
-    // Subdivide for GPU
-    // Lower threshold = more subdivision = better Newton convergence for curved parts
-    int maxDepth = 4;  // 4^4 = 256x subdivision per patch max
-    float flatnessThreshold = 0.05f;  // Reasonable subdivision
-
-    printf("\nSubdividing (maxDepth=%d, flatness=%.2f)...\n", maxDepth, flatnessThreshold);
-
-    auto subPatches = bezier::subdividePatches(patches, maxDepth, flatnessThreshold);
-
-    printf("After subdivision: %zu sub-patches\n", subPatches.size());
-    printf("Expansion ratio: %.1fx\n", (float)subPatches.size() / patches.size());
-
-    // Analyze sub-patch sizes
-    float minDiag = 1e10f, maxDiag = 0, avgDiag = 0;
-    for (const auto& sp : subPatches) {
-        float d = sp.bounds.diagonal();
-        minDiag = std::min(minDiag, d);
-        maxDiag = std::max(maxDiag, d);
-        avgDiag += d;
-    }
-    avgDiag /= subPatches.size();
-
-    printf("\nSub-patch AABB diagonals:\n");
-    printf("  Min: %.4f\n", minDiag);
-    printf("  Max: %.4f\n", maxDiag);
-    printf("  Avg: %.4f\n", avgDiag);
-
-    // GPU memory estimate
-    size_t patchBytes = subPatches.size() * 16 * sizeof(float) * 4;  // 16 vec4s per patch
-    size_t aabbBytes = subPatches.size() * 2 * sizeof(float) * 4;    // 2 vec4s per patch
-    printf("\nGPU memory estimate:\n");
-    printf("  Patches: %.1f KB\n", patchBytes / 1024.0f);
-    printf("  AABBs:   %.1f KB\n", aabbBytes / 1024.0f);
-    printf("  Total:   %.1f KB\n", (patchBytes + aabbBytes) / 1024.0f);
+    printf("Bounds: (%.2f, %.2f, %.2f) to (%.2f, %.2f, %.2f)\n",
+           boundsMin.x, boundsMin.y, boundsMin.z,
+           boundsMax.x, boundsMax.y, boundsMax.z);
 
     // Vulkan setup
     QVulkanInstance inst;
@@ -102,9 +73,10 @@ int main(int argc, char* argv[]) {
     printf("Controls: Left-drag to orbit, scroll to zoom, Esc to quit\n\n");
 
     // Create window and renderer
+    // BezierPatchGroup handles subdivision and BVH internally
     TeapotWindow window;
     window.setVulkanInstance(&inst);
-    window.setPatches(std::move(subPatches));
+    window.setPatches(std::move(patches));
     window.setTitle("Utah Teapot - Bezier Patch Ray Tracing");
     window.resize(800, 600);
     window.show();

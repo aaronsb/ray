@@ -432,6 +432,89 @@ bool hitGroundPlane(Ray r, float tMin, float tMax, inout HitRecord rec, uint mat
     return true;
 }
 
+// Bezier rotation helpers
+vec3 rotateX(vec3 v, float angle) {
+    float c = cos(angle), s = sin(angle);
+    return vec3(v.x, c * v.y - s * v.z, s * v.y + c * v.z);
+}
+vec3 rotateY(vec3 v, float angle) {
+    float c = cos(angle), s = sin(angle);
+    return vec3(c * v.x + s * v.z, v.y, -s * v.x + c * v.z);
+}
+vec3 rotateZ(vec3 v, float angle) {
+    float c = cos(angle), s = sin(angle);
+    return vec3(c * v.x - s * v.y, s * v.x + c * v.y, v.z);
+}
+vec3 rotateXYZ(vec3 v, vec3 angles) {
+    return rotateZ(rotateY(rotateX(v, angles.x), angles.y), angles.z);
+}
+vec3 rotateXYZInverse(vec3 v, vec3 angles) {
+    return rotateX(rotateY(rotateZ(v, -angles.z), -angles.y), -angles.x);
+}
+
+// Test bezier instance with BVH traversal
+bool hitBezierInstance(BezierInstance inst, Ray worldRay, float tMin, float tMax,
+                       inout HitRecord rec) {
+    // Transform ray to instance local space
+    vec3 translated = worldRay.origin - inst.position;
+    vec3 localOrigin = rotateXYZInverse(translated, inst.rotation) / inst.scale;
+    vec3 localDir = rotateXYZInverse(worldRay.direction, inst.rotation);
+
+    float localTMax = tMax / inst.scale;
+    float localTMin = tMin / inst.scale;
+
+    bool hit = false;
+    float closestT = localTMax;
+
+    // BVH traversal
+    uint stack[32];
+    int stackPtr = 0;
+    stack[stackPtr++] = 0;
+
+    while (stackPtr > 0) {
+        uint nodeIdx = stack[--stackPtr];
+        BVHNode node = bezierBVHNodes[nodeIdx];
+
+        vec3 aabbMin = vec3(node.minX, node.minY, node.minZ);
+        vec3 aabbMax = vec3(node.maxX, node.maxY, node.maxZ);
+
+        if (!hitAABB(aabbMin, aabbMax, localOrigin, localDir, localTMin, closestT))
+            continue;
+
+        bool isLeaf = (node.rightOrCount & 0x80000000u) != 0u;
+        if (isLeaf) {
+            uint first = node.leftOrFirst;
+            uint count = node.rightOrCount & 0x7FFFFFFFu;
+
+            for (uint i = 0; i < count; i++) {
+                uint patchIdx = bezierPatchIndices[first + i];
+
+                vec3 cp[16];
+                for (int j = 0; j < 16; j++) {
+                    cp[j] = bezierPatches[patchIdx * 16 + j].xyz;
+                }
+
+                float t, u, v;
+                vec3 n;
+                if (hitBezierPatch(cp, localOrigin, localDir, localTMin, closestT, t, u, v, n)) {
+                    hit = true;
+                    closestT = t;
+                    rec.t = t * inst.scale;  // Transform t back to world
+                    rec.point = worldRay.origin + rec.t * worldRay.direction;
+                    rec.normal = rotateXYZ(n, inst.rotation);  // Transform normal to world
+                    setFaceNormal(rec, worldRay, rec.normal);
+                    rec.materialId = inst.materialId;
+                }
+            }
+        } else {
+            stack[stackPtr++] = node.rightOrCount;
+            stack[stackPtr++] = node.leftOrFirst;
+        }
+    }
+
+    return hit;
+}
+
 // Scene intersection
 // Requires: spheres[], boxes[], cylinders[], cones[] buffers and counts
 bool hitScene(Ray r, float tMin, float tMax, inout HitRecord rec) {
@@ -485,6 +568,15 @@ bool hitScene(Ray r, float tMin, float tMax, inout HitRecord rec) {
     // Check tori
     for (uint i = 0; i < pc.torusCount; i++) {
         if (hitTorus(tori[i], r, tMin, closestSoFar, tempRec)) {
+            hitAnything = true;
+            closestSoFar = tempRec.t;
+            rec = tempRec;
+        }
+    }
+
+    // Check bezier instances
+    for (uint i = 0; i < pc.bezierInstanceCount; i++) {
+        if (hitBezierInstance(bezierInstances[i], r, tMin, closestSoFar, tempRec)) {
             hitAnything = true;
             closestSoFar = tempRec.t;
             rec = tempRec;

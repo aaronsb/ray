@@ -92,6 +92,16 @@ private:
     VkBuffer m_materialBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_materialBufferMemory = VK_NULL_HANDLE;
 
+    // Bezier patch buffers
+    VkBuffer m_bezierPatchBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_bezierPatchBufferMemory = VK_NULL_HANDLE;
+    VkBuffer m_bezierBVHBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_bezierBVHBufferMemory = VK_NULL_HANDLE;
+    VkBuffer m_bezierIndexBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_bezierIndexBufferMemory = VK_NULL_HANDLE;
+    VkBuffer m_bezierInstanceBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_bezierInstanceBufferMemory = VK_NULL_HANDLE;
+
     // Camera uniform buffer
     VkBuffer m_cameraBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_cameraBufferMemory = VK_NULL_HANDLE;

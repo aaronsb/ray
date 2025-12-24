@@ -6,8 +6,13 @@
 #include <QVulkanWindow>
 #include <QElapsedTimer>
 #include <vector>
-#include "bezier_subdiv.h"
-#include "bvh.h"
+#include "../../parametric/bezier/patch_group.h"
+
+using parametric::BezierInstance;
+using parametric::BezierPatchGroup;
+using parametric::Patch;
+using parametric::SubPatch;
+using parametric::BVHNode;
 
 // Push constants matching teapot.comp
 struct TeapotPushConstants {
@@ -18,7 +23,7 @@ struct TeapotPushConstants {
     float camPosX, camPosY, camPosZ;
     uint32_t frameIndex;
     float camTargetX, camTargetY, camTargetZ;
-    float _pad2;
+    uint32_t numInstances;
 };
 
 // Simple orbit camera
@@ -52,7 +57,7 @@ struct TeapotCamera {
 class TeapotRenderer : public QVulkanWindowRenderer {
 public:
     explicit TeapotRenderer(QVulkanWindow* window,
-                            std::vector<bezier::SubPatch> patches);
+                            std::vector<Patch> patches);
 
     void initResources() override;
     void initSwapChainResources() override;
@@ -71,9 +76,9 @@ private:
     QVulkanWindow* m_window;
     QVulkanDeviceFunctions* m_devFuncs = nullptr;
 
-    // Patch data (from CPU subdivision)
-    std::vector<bezier::SubPatch> m_patches;
-    bvh::BVH m_bvh;
+    // Patch data
+    BezierPatchGroup m_patchGroup;
+    std::vector<BezierInstance> m_instances;
     TeapotCamera m_camera;
 
     // Vulkan resources
@@ -99,6 +104,10 @@ private:
     // Patch index buffer (reordered by BVH)
     VkBuffer m_patchIndexBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_patchIndexBufferMemory = VK_NULL_HANDLE;
+
+    // Instance buffer
+    VkBuffer m_instanceBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_instanceBufferMemory = VK_NULL_HANDLE;
 
     // Frame tracking
     uint32_t m_frameIndex = 0;
@@ -131,7 +140,7 @@ private:
 class TeapotWindow : public QVulkanWindow {
     Q_OBJECT
 public:
-    void setPatches(std::vector<bezier::SubPatch> patches) {
+    void setPatches(std::vector<Patch> patches) {
         m_patches = std::move(patches);
     }
     QVulkanWindowRenderer* createRenderer() override;
@@ -146,7 +155,7 @@ protected:
     void keyPressEvent(QKeyEvent* event) override;
 
 private:
-    std::vector<bezier::SubPatch> m_patches;
+    std::vector<Patch> m_patches;
     TeapotRenderer* m_renderer = nullptr;
     QPointF m_lastMousePos;
     bool m_leftMousePressed = false;

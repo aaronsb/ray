@@ -115,6 +115,37 @@ layout(std430, set = 0, binding = 9) readonly buffer TorusBuffer {
     Torus tori[];
 };
 
+// Bezier patch structures
+struct BVHNode {
+    float minX, minY, minZ;
+    uint leftOrFirst;
+    float maxX, maxY, maxZ;
+    uint rightOrCount;
+};
+
+struct BezierInstance {
+    vec3 position;
+    float scale;
+    vec3 rotation;  // Euler XYZ
+    uint materialId;
+};
+
+layout(std430, set = 0, binding = 10) readonly buffer BezierPatchBuffer {
+    vec4 bezierPatches[];  // 16 vec4s per patch
+};
+
+layout(std430, set = 0, binding = 11) readonly buffer BezierBVHBuffer {
+    BVHNode bezierBVHNodes[];
+};
+
+layout(std430, set = 0, binding = 12) readonly buffer BezierIndexBuffer {
+    uint bezierPatchIndices[];
+};
+
+layout(std430, set = 0, binding = 13) readonly buffer BezierInstanceBuffer {
+    BezierInstance bezierInstances[];
+};
+
 layout(std140, set = 0, binding = 4) uniform CameraUBO {
     vec3 origin;
     float _pad1;
@@ -150,6 +181,10 @@ layout(push_constant) uniform PushConstants {
     uint accumulate;
     float sunElevation;
     float sunAzimuth;
+    uint bezierPatchCount;
+    uint bezierBVHNodeCount;
+    uint bezierInstanceCount;
+    uint _pad;
 } pc;
 
 // ============ CONSTANTS ============
@@ -162,6 +197,7 @@ const float T_MAX = 10000.0;
 
 #include "noise.glsl"
 #include "random.glsl"
+#include "includes/bezier.glsl"
 #include "geometry.glsl"
 #include "materials.glsl"
 #include "lights.glsl"

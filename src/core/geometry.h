@@ -1,6 +1,10 @@
 #pragma once
 
 #include "types.h"
+#include "../parametric/sphere/sphere.h"
+
+// Re-export Sphere from parametric library
+using parametric::Sphere;
 
 // Geometry type enum for dispatch
 enum class GeometryType : uint32_t {
@@ -9,55 +13,42 @@ enum class GeometryType : uint32_t {
     Cylinder = 2,
     Cone = 3,
     Torus = 4
-    // Future: VoxelChunk, TriangleMesh (see ADR-004)
-};
-
-// GPU sphere - 32 bytes, 16-byte aligned
-struct alignas(16) Sphere {
-    Vec3 center;           // 16 bytes (padded)
-    float radius;
-    uint32_t materialId;
-    float _pad[2];         // pad to 16 bytes
 };
 
 // GPU box (axis-aligned) - 48 bytes, 16-byte aligned
 struct alignas(16) Box {
-    Vec3 center;           // 16 bytes (padded)
-    Vec3 halfExtents;      // 16 bytes (padded) - size/2 in each dimension
+    Vec3 center;
+    Vec3 halfExtents;
     uint32_t materialId;
-    float _pad[3];         // pad to 16 bytes
+    float _pad[3];
 };
 
 // GPU cylinder - 48 bytes, 16-byte aligned
-// Defined by base center, axis direction, radius, and height
 struct alignas(16) Cylinder {
-    Vec3 base;             // 16 bytes (padded) - center of base cap
-    Vec3 axis;             // 16 bytes (padded) - normalized direction (base to top)
+    Vec3 base;
+    Vec3 axis;
     float radius;
     float height;
     uint32_t materialId;
-    uint32_t caps;         // 0 = no caps, 1 = caps (default)
+    uint32_t caps;
 };
 
 // GPU cone - 48 bytes, 16-byte aligned
-// Defined by base center, axis direction, base radius, and height
-// Tip is at base + axis * height
 struct alignas(16) Cone {
-    Vec3 base;             // 16 bytes (padded) - center of base cap
-    Vec3 axis;             // 16 bytes (padded) - normalized direction (base to tip)
-    float radius;          // radius at base (tip has radius 0)
+    Vec3 base;
+    Vec3 axis;
+    float radius;
     float height;
     uint32_t materialId;
-    uint32_t cap;          // 0 = no base cap, 1 = cap (default)
+    uint32_t cap;
 };
 
 // GPU torus - 48 bytes, 16-byte aligned
-// Defined by center, axis (normal to ring plane), major and minor radii
 struct alignas(16) Torus {
-    Vec3 center;           // 16 bytes (padded) - center of the torus
-    Vec3 axis;             // 16 bytes (padded) - normalized, points through the hole
-    float majorRadius;     // distance from center to tube center
-    float minorRadius;     // radius of the tube
+    Vec3 center;
+    Vec3 axis;
+    float majorRadius;
+    float minorRadius;
     uint32_t materialId;
     uint32_t _pad;
 };

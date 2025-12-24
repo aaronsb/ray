@@ -12,6 +12,8 @@
 #include "materials.h"
 #include "geometry.h"
 #include "lights.h"
+#include "../parametric/bezier/patch_group.h"
+#include "../parametric/bezier/instance.h"
 
 // Push constants for per-frame data
 struct alignas(16) PushConstants {
@@ -30,6 +32,10 @@ struct alignas(16) PushConstants {
     uint32_t accumulate;  // 0 = no accumulation (moving), 1 = accumulate (stationary)
     float sunElevation;   // radians, 0 = horizon, PI/2 = zenith
     float sunAzimuth;     // radians, angle around Y axis
+    uint32_t bezierPatchCount;
+    uint32_t bezierBVHNodeCount;
+    uint32_t bezierInstanceCount;
+    uint32_t _pad;
 };
 
 // Scene container with add/remove API
@@ -53,6 +59,19 @@ public:
     void add(const Cylinder& cyl) { m_cylinders.push_back(cyl); }
     void add(const Cone& cone) { m_cones.push_back(cone); }
     void add(const Torus& torus) { m_tori.push_back(torus); }
+    void add(const parametric::BezierInstance& inst) { m_bezierInstances.push_back(inst); }
+
+    // Build bezier patch group from raw patches
+    void buildBezierGroup(const std::vector<parametric::Patch>& patches,
+                          int maxDepth = 4, float flatnessThreshold = 0.05f) {
+        m_bezierGroup.build(patches, maxDepth, flatnessThreshold);
+    }
+
+    // Add bezier instance
+    void addBezierInstance(float x, float y, float z, float scale,
+                           float rotX, float rotY, float rotZ, uint32_t materialId) {
+        m_bezierInstances.push_back({x, y, z, scale, rotX, rotY, rotZ, materialId});
+    }
 
     // Convenience: add sphere by parameters
     void addSphere(Vec3 center, float radius, uint32_t materialId) {
@@ -105,6 +124,8 @@ public:
         m_tori.clear();
         m_spotLights.clear();
         m_materials.clear();
+        m_bezierGroup = parametric::BezierPatchGroup();
+        m_bezierInstances.clear();
     }
 
     // Accessors for renderer
@@ -115,6 +136,8 @@ public:
     const std::vector<Torus>& tori() const { return m_tori; }
     const std::vector<SpotLight>& spotLights() const { return m_spotLights; }
     const std::vector<Material>& materials() const { return m_materials; }
+    const parametric::BezierPatchGroup& bezierGroup() const { return m_bezierGroup; }
+    const std::vector<parametric::BezierInstance>& bezierInstances() const { return m_bezierInstances; }
 
     // Mutable access for runtime modifications (e.g., gobo cycling)
     std::vector<SpotLight>& spotLightsMut() { return m_spotLights; }
@@ -127,6 +150,9 @@ public:
     uint32_t torusCount() const { return static_cast<uint32_t>(m_tori.size()); }
     uint32_t spotLightCount() const { return static_cast<uint32_t>(m_spotLights.size()); }
     uint32_t materialCount() const { return static_cast<uint32_t>(m_materials.size()); }
+    uint32_t bezierPatchCount() const { return m_bezierGroup.subPatchCount(); }
+    uint32_t bezierBVHNodeCount() const { return m_bezierGroup.bvhNodeCount(); }
+    uint32_t bezierInstanceCount() const { return static_cast<uint32_t>(m_bezierInstances.size()); }
 
     // === SERIALIZATION ===
 
@@ -286,4 +312,6 @@ private:
     std::vector<Torus> m_tori;
     std::vector<SpotLight> m_spotLights;
     std::vector<Material> m_materials;
+    parametric::BezierPatchGroup m_bezierGroup;
+    std::vector<parametric::BezierInstance> m_bezierInstances;
 };

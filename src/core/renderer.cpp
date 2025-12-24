@@ -141,6 +141,38 @@ void RayTracingRenderer::releaseResources() {
         m_devFuncs->vkFreeMemory(dev, m_materialBufferMemory, nullptr);
         m_materialBufferMemory = VK_NULL_HANDLE;
     }
+    if (m_bezierPatchBuffer) {
+        m_devFuncs->vkDestroyBuffer(dev, m_bezierPatchBuffer, nullptr);
+        m_bezierPatchBuffer = VK_NULL_HANDLE;
+    }
+    if (m_bezierPatchBufferMemory) {
+        m_devFuncs->vkFreeMemory(dev, m_bezierPatchBufferMemory, nullptr);
+        m_bezierPatchBufferMemory = VK_NULL_HANDLE;
+    }
+    if (m_bezierBVHBuffer) {
+        m_devFuncs->vkDestroyBuffer(dev, m_bezierBVHBuffer, nullptr);
+        m_bezierBVHBuffer = VK_NULL_HANDLE;
+    }
+    if (m_bezierBVHBufferMemory) {
+        m_devFuncs->vkFreeMemory(dev, m_bezierBVHBufferMemory, nullptr);
+        m_bezierBVHBufferMemory = VK_NULL_HANDLE;
+    }
+    if (m_bezierIndexBuffer) {
+        m_devFuncs->vkDestroyBuffer(dev, m_bezierIndexBuffer, nullptr);
+        m_bezierIndexBuffer = VK_NULL_HANDLE;
+    }
+    if (m_bezierIndexBufferMemory) {
+        m_devFuncs->vkFreeMemory(dev, m_bezierIndexBufferMemory, nullptr);
+        m_bezierIndexBufferMemory = VK_NULL_HANDLE;
+    }
+    if (m_bezierInstanceBuffer) {
+        m_devFuncs->vkDestroyBuffer(dev, m_bezierInstanceBuffer, nullptr);
+        m_bezierInstanceBuffer = VK_NULL_HANDLE;
+    }
+    if (m_bezierInstanceBufferMemory) {
+        m_devFuncs->vkFreeMemory(dev, m_bezierInstanceBufferMemory, nullptr);
+        m_bezierInstanceBufferMemory = VK_NULL_HANDLE;
+    }
     if (m_cameraBuffer) {
         m_devFuncs->vkDestroyBuffer(dev, m_cameraBuffer, nullptr);
         m_cameraBuffer = VK_NULL_HANDLE;
@@ -282,6 +314,31 @@ void RayTracingRenderer::createSceneBuffers() {
                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                  m_cameraBuffer, m_cameraBufferMemory);
 
+    // Bezier buffers (from patch group)
+    const auto& bezierGroup = m_scene.bezierGroup();
+    const auto& bezierInstances = m_scene.bezierInstances();
+    std::vector<float> bezierPatchData = bezierGroup.packPatchData();
+    const auto& bezierBVHNodes = bezierGroup.bvhNodes();
+    const auto& bezierPatchIndices = bezierGroup.patchIndices();
+
+    VkDeviceSize bezierPatchSize = std::max(bezierPatchData.size() * sizeof(float), size_t(64));
+    VkDeviceSize bezierBVHSize = std::max(bezierBVHNodes.size() * sizeof(parametric::BVHNode), size_t(64));
+    VkDeviceSize bezierIndexSize = std::max(bezierPatchIndices.size() * sizeof(uint32_t), size_t(64));
+    VkDeviceSize bezierInstanceSize = std::max(bezierInstances.size() * sizeof(parametric::BezierInstance), size_t(64));
+
+    createBuffer(bezierPatchSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 m_bezierPatchBuffer, m_bezierPatchBufferMemory);
+    createBuffer(bezierBVHSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 m_bezierBVHBuffer, m_bezierBVHBufferMemory);
+    createBuffer(bezierIndexSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 m_bezierIndexBuffer, m_bezierIndexBufferMemory);
+    createBuffer(bezierInstanceSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 m_bezierInstanceBuffer, m_bezierInstanceBufferMemory);
+
     // Upload scene data
     VkDevice dev = m_window->device();
     void* data;
@@ -324,6 +381,28 @@ void RayTracingRenderer::createSceneBuffers() {
     memcpy(data, materials.data(), materialSize);
     m_devFuncs->vkUnmapMemory(dev, m_materialBufferMemory);
 
+    // Upload bezier data
+    if (!bezierPatchData.empty()) {
+        m_devFuncs->vkMapMemory(dev, m_bezierPatchBufferMemory, 0, bezierPatchSize, 0, &data);
+        memcpy(data, bezierPatchData.data(), bezierPatchData.size() * sizeof(float));
+        m_devFuncs->vkUnmapMemory(dev, m_bezierPatchBufferMemory);
+    }
+    if (!bezierBVHNodes.empty()) {
+        m_devFuncs->vkMapMemory(dev, m_bezierBVHBufferMemory, 0, bezierBVHSize, 0, &data);
+        memcpy(data, bezierBVHNodes.data(), bezierBVHNodes.size() * sizeof(parametric::BVHNode));
+        m_devFuncs->vkUnmapMemory(dev, m_bezierBVHBufferMemory);
+    }
+    if (!bezierPatchIndices.empty()) {
+        m_devFuncs->vkMapMemory(dev, m_bezierIndexBufferMemory, 0, bezierIndexSize, 0, &data);
+        memcpy(data, bezierPatchIndices.data(), bezierPatchIndices.size() * sizeof(uint32_t));
+        m_devFuncs->vkUnmapMemory(dev, m_bezierIndexBufferMemory);
+    }
+    if (!bezierInstances.empty()) {
+        m_devFuncs->vkMapMemory(dev, m_bezierInstanceBufferMemory, 0, bezierInstanceSize, 0, &data);
+        memcpy(data, bezierInstances.data(), bezierInstances.size() * sizeof(parametric::BezierInstance));
+        m_devFuncs->vkUnmapMemory(dev, m_bezierInstanceBufferMemory);
+    }
+
     // Keep camera buffer mapped for updates each frame
     m_devFuncs->vkMapMemory(dev, m_cameraBufferMemory, 0, cameraSize, 0, &m_cameraMapped);
 }
@@ -334,7 +413,7 @@ void RayTracingRenderer::createDescriptorSet() {
     // Create descriptor pool
     std::array<VkDescriptorPoolSize, 3> poolSizes{};
     poolSizes[0] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2};
-    poolSizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 7};  // spheres, materials, boxes, spotlights, cylinders, cones, tori
+    poolSizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 11};  // primitives + bezier (patches, bvh, indices, instances)
     poolSizes[2] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1};
 
     VkDescriptorPoolCreateInfo poolInfo{};
@@ -407,7 +486,27 @@ void RayTracingRenderer::createDescriptorSet() {
     torusBufferInfo.offset = 0;
     torusBufferInfo.range = VK_WHOLE_SIZE;
 
-    std::array<VkWriteDescriptorSet, 10> writes{};
+    VkDescriptorBufferInfo bezierPatchBufferInfo{};
+    bezierPatchBufferInfo.buffer = m_bezierPatchBuffer;
+    bezierPatchBufferInfo.offset = 0;
+    bezierPatchBufferInfo.range = VK_WHOLE_SIZE;
+
+    VkDescriptorBufferInfo bezierBVHBufferInfo{};
+    bezierBVHBufferInfo.buffer = m_bezierBVHBuffer;
+    bezierBVHBufferInfo.offset = 0;
+    bezierBVHBufferInfo.range = VK_WHOLE_SIZE;
+
+    VkDescriptorBufferInfo bezierIndexBufferInfo{};
+    bezierIndexBufferInfo.buffer = m_bezierIndexBuffer;
+    bezierIndexBufferInfo.offset = 0;
+    bezierIndexBufferInfo.range = VK_WHOLE_SIZE;
+
+    VkDescriptorBufferInfo bezierInstanceBufferInfo{};
+    bezierInstanceBufferInfo.buffer = m_bezierInstanceBuffer;
+    bezierInstanceBufferInfo.offset = 0;
+    bezierInstanceBufferInfo.range = VK_WHOLE_SIZE;
+
+    std::array<VkWriteDescriptorSet, 14> writes{};
 
     // Binding 0: output image
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -489,6 +588,38 @@ void RayTracingRenderer::createDescriptorSet() {
     writes[9].descriptorCount = 1;
     writes[9].pBufferInfo = &torusBufferInfo;
 
+    // Binding 10: bezier patches buffer
+    writes[10].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[10].dstSet = m_descriptorSet;
+    writes[10].dstBinding = 10;
+    writes[10].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[10].descriptorCount = 1;
+    writes[10].pBufferInfo = &bezierPatchBufferInfo;
+
+    // Binding 11: bezier BVH buffer
+    writes[11].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[11].dstSet = m_descriptorSet;
+    writes[11].dstBinding = 11;
+    writes[11].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[11].descriptorCount = 1;
+    writes[11].pBufferInfo = &bezierBVHBufferInfo;
+
+    // Binding 12: bezier patch indices buffer
+    writes[12].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[12].dstSet = m_descriptorSet;
+    writes[12].dstBinding = 12;
+    writes[12].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[12].descriptorCount = 1;
+    writes[12].pBufferInfo = &bezierIndexBufferInfo;
+
+    // Binding 13: bezier instances buffer
+    writes[13].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[13].dstSet = m_descriptorSet;
+    writes[13].dstBinding = 13;
+    writes[13].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[13].descriptorCount = 1;
+    writes[13].pBufferInfo = &bezierInstanceBufferInfo;
+
     m_devFuncs->vkUpdateDescriptorSets(dev, writes.size(), writes.data(), 0, nullptr);
 }
 
@@ -496,7 +627,7 @@ void RayTracingRenderer::createComputePipeline() {
     VkDevice dev = m_window->device();
 
     // Create descriptor set layout
-    std::array<VkDescriptorSetLayoutBinding, 10> bindings{};
+    std::array<VkDescriptorSetLayoutBinding, 14> bindings{};
 
     // Binding 0: output image
     bindings[0].binding = 0;
@@ -557,6 +688,30 @@ void RayTracingRenderer::createComputePipeline() {
     bindings[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[9].descriptorCount = 1;
     bindings[9].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    // Binding 10: bezier patches SSBO
+    bindings[10].binding = 10;
+    bindings[10].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[10].descriptorCount = 1;
+    bindings[10].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    // Binding 11: bezier BVH SSBO
+    bindings[11].binding = 11;
+    bindings[11].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[11].descriptorCount = 1;
+    bindings[11].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    // Binding 12: bezier patch indices SSBO
+    bindings[12].binding = 12;
+    bindings[12].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[12].descriptorCount = 1;
+    bindings[12].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    // Binding 13: bezier instances SSBO
+    bindings[13].binding = 13;
+    bindings[13].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[13].descriptorCount = 1;
+    bindings[13].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -657,6 +812,9 @@ void RayTracingRenderer::recordComputeCommands(VkCommandBuffer cmdBuf, bool isSt
     pc.accumulate = isStationary ? 1 : 0;  // Proper accumulation when still, rolling avg when moving
     pc.sunElevation = m_sunElevation;
     pc.sunAzimuth = m_sunAzimuth;
+    pc.bezierPatchCount = m_scene.bezierPatchCount();
+    pc.bezierBVHNodeCount = m_scene.bezierBVHNodeCount();
+    pc.bezierInstanceCount = m_scene.bezierInstanceCount();
 
     m_devFuncs->vkCmdPushConstants(cmdBuf, m_pipelineLayout,
         VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PushConstants), &pc);
