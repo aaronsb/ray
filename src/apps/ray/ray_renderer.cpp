@@ -24,17 +24,11 @@ void RayRenderer::initResources() {
 
     const float PI = 3.14159265f;
 
-    // Create teapot instances - each showcases a different material effect
+    // Teapot instances - reduced to showcase alongside CSG scene
     // Format: {posX, posY, posZ, scale, rotX, rotY, rotZ, materialId}
     m_instances = {
-        // Front row
-        {-4.0f, 0.0f, 4.0f, 0.6f, 0.0f, PI * 0.3f, 0.0f, 0},   // 0: Diffuse ceramic
-        { 0.0f, 0.0f, 4.0f, 0.6f, 0.0f, 0.0f, 0.0f, 1},        // 1: Polished mirror metal
-        { 4.0f, 0.0f, 4.0f, 0.6f, 0.0f, -PI * 0.3f, 0.0f, 2},  // 2: Rough metal (sandpaper)
-        // Back row
-        {-4.0f, 0.0f, -2.0f, 0.6f, 0.0f, PI * 0.8f, 0.0f, 3},  // 3: Hammered metal (bump)
-        { 0.0f, 0.0f, -2.0f, 0.6f, 0.0f, PI, 0.0f, 4},         // 4: Clear glass
-        { 4.0f, 0.0f, -2.0f, 0.6f, 0.0f, -PI * 0.8f, 0.0f, 5}, // 5: Colored glass (absorption)
+        {-10.0f, 0.0f, 0.0f, 0.5f, 0.0f, PI * 0.5f, 0.0f, 1},  // Polished silver
+        { 10.0f, 0.0f, 0.0f, 0.5f, 0.0f, -PI * 0.5f, 0.0f, 4}, // Clear glass
     };
 
     createPatchBuffers();

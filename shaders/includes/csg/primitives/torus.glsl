@@ -95,11 +95,19 @@ Interval rayTorus(vec3 ro, vec3 rd, vec3 center, float majorRadius, float minorR
 
     vec3 q1 = pEnter - center;
     float len1 = length(vec2(q1.x, q1.z));
-    nEnter = normalize(vec3(q1.x * (1.0 - R/len1), q1.y, q1.z * (1.0 - R/len1)));
+    if (len1 < 1e-6) {
+        nEnter = vec3(0, sign(q1.y), 0);  // Degenerate - point on axis
+    } else {
+        nEnter = normalize(vec3(q1.x * (1.0 - R/len1), q1.y, q1.z * (1.0 - R/len1)));
+    }
 
     vec3 q2 = pExit - center;
     float len2 = length(vec2(q2.x, q2.z));
-    nExit = normalize(vec3(q2.x * (1.0 - R/len2), q2.y, q2.z * (1.0 - R/len2)));
+    if (len2 < 1e-6) {
+        nExit = vec3(0, sign(q2.y), 0);  // Degenerate - point on axis
+    } else {
+        nExit = normalize(vec3(q2.x * (1.0 - R/len2), q2.y, q2.z * (1.0 - R/len2)));
+    }
 
     return Interval(tEnter, tExit, nEnter, nExit);
 }

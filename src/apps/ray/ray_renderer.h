@@ -29,12 +29,12 @@ struct RayPushConstants {
 
 // Simple orbit camera
 struct RayCamera {
-    float distance = 12.0f;
-    float azimuth = 0.5f;
-    float elevation = 0.4f;
+    float distance = 18.0f;
+    float azimuth = 0.3f;
+    float elevation = 0.5f;
     float targetX = 0.0f;
-    float targetY = 0.5f;
-    float targetZ = 1.5f;
+    float targetY = 1.0f;
+    float targetZ = 0.0f;
 
     void rotate(float dAzimuth, float dElevation) {
         azimuth += dAzimuth;

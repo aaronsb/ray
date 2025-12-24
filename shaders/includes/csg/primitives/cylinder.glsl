@@ -17,13 +17,30 @@ Interval rayCylinder(vec3 ro, vec3 rd, vec3 center, float radius, float height) 
     float disc = b * b - 4.0 * a * c;
     if (disc < 0.0) return EMPTY_INTERVAL;
 
-    float sqrtDisc = sqrt(disc);
-    float t1 = (-b - sqrtDisc) / (2.0 * a);
-    float t2 = (-b + sqrtDisc) / (2.0 * a);
+    // Handle degenerate case (ray parallel to cylinder axis)
+    float t1, t2;
+    if (abs(a) < 1e-6) {
+        // Ray is vertical - check if inside cylinder radius
+        if (c > 0.0) return EMPTY_INTERVAL;  // Outside radius
+        t1 = -1e30;
+        t2 = 1e30;
+    } else {
+        float sqrtDisc = sqrt(disc);
+        t1 = (-b - sqrtDisc) / (2.0 * a);
+        t2 = (-b + sqrtDisc) / (2.0 * a);
+    }
 
-    // Check caps
-    float tCap0 = (0.0 - oc.y) / rd.y;      // Bottom cap
-    float tCap1 = (height - oc.y) / rd.y;   // Top cap
+    // Check caps - handle horizontal rays
+    float tCap0, tCap1;
+    if (abs(rd.y) < 1e-6) {
+        // Ray is horizontal - either inside or outside height range
+        if (oc.y < 0.0 || oc.y > height) return EMPTY_INTERVAL;
+        tCap0 = -1e30;
+        tCap1 = 1e30;
+    } else {
+        tCap0 = (0.0 - oc.y) / rd.y;      // Bottom cap
+        tCap1 = (height - oc.y) / rd.y;   // Top cap
+    }
 
     if (tCap0 > tCap1) {
         float tmp = tCap0; tCap0 = tCap1; tCap1 = tmp;
