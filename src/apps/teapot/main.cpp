@@ -10,7 +10,7 @@
 
 #include "teapot_patches.h"
 #include "bezier_subdiv.h"
-#include "renderer.h"
+#include "teapot_renderer.h"
 
 // Convert raw teapot data to Patch structs
 std::vector<bezier::Patch> loadTeapotPatches() {
@@ -56,8 +56,9 @@ int main(int argc, char* argv[]) {
            teapotMax.x, teapotMax.y, teapotMax.z);
 
     // Subdivide for GPU
-    int maxDepth = 3;  // 4^3 = 64x subdivision per patch max
-    float flatnessThreshold = 0.15f;  // Stop if AABB diagonal < this
+    // Lower threshold = more subdivision = better Newton convergence for curved parts
+    int maxDepth = 4;  // 4^4 = 256x subdivision per patch max
+    float flatnessThreshold = 0.08f;  // Smaller patches for spout/handle convergence
 
     printf("\nSubdividing (maxDepth=%d, flatness=%.2f)...\n", maxDepth, flatnessThreshold);
 
@@ -83,13 +84,13 @@ int main(int argc, char* argv[]) {
 
     // GPU memory estimate
     size_t patchBytes = subPatches.size() * 16 * sizeof(float) * 4;  // 16 vec4s per patch
-    size_t aabbBytes = subPatches.size() * 6 * sizeof(float);         // min + max vec3
+    size_t aabbBytes = subPatches.size() * 2 * sizeof(float) * 4;    // 2 vec4s per patch
     printf("\nGPU memory estimate:\n");
     printf("  Patches: %.1f KB\n", patchBytes / 1024.0f);
     printf("  AABBs:   %.1f KB\n", aabbBytes / 1024.0f);
     printf("  Total:   %.1f KB\n", (patchBytes + aabbBytes) / 1024.0f);
 
-    // Vulkan setup check
+    // Vulkan setup
     QVulkanInstance inst;
     inst.setLayers({"VK_LAYER_KHRONOS_validation"});
 
@@ -97,9 +98,16 @@ int main(int argc, char* argv[]) {
         qFatal("Failed to create Vulkan instance: %d", inst.errorCode());
     }
 
-    printf("\n=== Ready for GPU ray tracing ===\n");
-    printf("Sub-patches are small enough for reliable Newton convergence.\n");
-    printf("Next: Upload to GPU buffer and render.\n");
+    printf("\n=== Launching GPU ray tracer ===\n");
+    printf("Controls: Left-drag to orbit, scroll to zoom, Esc to quit\n\n");
 
-    return 0;
+    // Create window and renderer
+    TeapotWindow window;
+    window.setVulkanInstance(&inst);
+    window.setPatches(std::move(subPatches));
+    window.setTitle("Utah Teapot - Bezier Patch Ray Tracing");
+    window.resize(800, 600);
+    window.show();
+
+    return app.exec();
 }

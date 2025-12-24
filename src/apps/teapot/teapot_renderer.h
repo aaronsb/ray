@@ -1,0 +1,143 @@
+#pragma once
+
+// Simplified Vulkan renderer for Utah teapot Bezier patch ray tracing
+// Derived from RayTracingRenderer but specialized for patches only
+
+#include <QVulkanWindow>
+#include <QElapsedTimer>
+#include <vector>
+#include "bezier_subdiv.h"
+
+// Push constants matching teapot.comp
+struct TeapotPushConstants {
+    uint32_t width;
+    uint32_t height;
+    uint32_t numPatches;
+    uint32_t frameIndex;
+    float camPosX, camPosY, camPosZ;
+    float _pad1;
+    float camTargetX, camTargetY, camTargetZ;
+    float _pad2;
+};
+
+// Simple orbit camera
+struct TeapotCamera {
+    float distance = 12.0f;
+    float azimuth = 0.5f;      // Horizontal rotation (slight angle)
+    float elevation = 0.4f;    // Vertical angle (looking slightly down)
+    float targetX = 0.0f;
+    float targetY = 0.5f;      // Teapot center (bounds: y=-2 to 2, center ~0)
+    float targetZ = 1.5f;      // Teapot Z center (bounds: z=0 to 3.15)
+
+    void rotate(float dAzimuth, float dElevation) {
+        azimuth += dAzimuth;
+        elevation += dElevation;
+        // Clamp elevation to avoid gimbal lock
+        elevation = std::clamp(elevation, -1.5f, 1.5f);
+    }
+
+    void zoom(float delta) {
+        distance *= (1.0f - delta * 0.1f);
+        distance = std::clamp(distance, 1.0f, 50.0f);
+    }
+
+    void getPosition(float& x, float& y, float& z) const {
+        x = targetX + distance * std::cos(elevation) * std::sin(azimuth);
+        y = targetY + distance * std::sin(elevation);
+        z = targetZ + distance * std::cos(elevation) * std::cos(azimuth);
+    }
+};
+
+class TeapotRenderer : public QVulkanWindowRenderer {
+public:
+    explicit TeapotRenderer(QVulkanWindow* window,
+                            std::vector<bezier::SubPatch> patches);
+
+    void initResources() override;
+    void initSwapChainResources() override;
+    void releaseSwapChainResources() override;
+    void releaseResources() override;
+    void startNextFrame() override;
+
+    TeapotCamera& camera() { return m_camera; }
+    void markCameraMotion() {
+        m_frameIndex = 0;
+        m_window->requestUpdate();
+    }
+
+private:
+    QVulkanWindow* m_window;
+    QVulkanDeviceFunctions* m_devFuncs = nullptr;
+
+    // Patch data (from CPU subdivision)
+    std::vector<bezier::SubPatch> m_patches;
+    TeapotCamera m_camera;
+
+    // Vulkan resources
+    VkPipeline m_computePipeline = VK_NULL_HANDLE;
+    VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_descriptorSetLayout = VK_NULL_HANDLE;
+    VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
+    VkDescriptorSet m_descriptorSet = VK_NULL_HANDLE;
+
+    // Output image
+    VkImage m_storageImage = VK_NULL_HANDLE;
+    VkDeviceMemory m_storageImageMemory = VK_NULL_HANDLE;
+    VkImageView m_storageImageView = VK_NULL_HANDLE;
+
+    // Patch data buffer (16 vec4s per patch)
+    VkBuffer m_patchBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_patchBufferMemory = VK_NULL_HANDLE;
+
+    // AABB buffer (2 vec4s per patch: min, max)
+    VkBuffer m_aabbBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_aabbBufferMemory = VK_NULL_HANDLE;
+
+    // Frame tracking
+    uint32_t m_frameIndex = 0;
+    bool m_needsImageTransition = true;
+
+    // Helpers
+    VkShaderModule createShaderModule(const QString& path);
+    void createStorageImage();
+    void createPatchBuffers();
+    void createDescriptorSet();
+    void createComputePipeline();
+    void recordComputeCommands(VkCommandBuffer cmdBuf);
+
+    uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties);
+    void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
+                      VkMemoryPropertyFlags properties, VkBuffer& buffer,
+                      VkDeviceMemory& memory);
+    void createImage(uint32_t width, uint32_t height, VkFormat format,
+                     VkImageUsageFlags usage, VkImage& image, VkDeviceMemory& memory);
+    VkImageView createImageView(VkImage image, VkFormat format);
+    void transitionImageLayout(VkCommandBuffer cmdBuf, VkImage image,
+                               VkImageLayout oldLayout, VkImageLayout newLayout,
+                               VkAccessFlags srcAccess, VkAccessFlags dstAccess,
+                               VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage);
+};
+
+class TeapotWindow : public QVulkanWindow {
+    Q_OBJECT
+public:
+    void setPatches(std::vector<bezier::SubPatch> patches) {
+        m_patches = std::move(patches);
+    }
+    QVulkanWindowRenderer* createRenderer() override;
+
+    TeapotRenderer* renderer() const { return m_renderer; }
+
+protected:
+    void mousePressEvent(QMouseEvent* event) override;
+    void mouseReleaseEvent(QMouseEvent* event) override;
+    void mouseMoveEvent(QMouseEvent* event) override;
+    void wheelEvent(QWheelEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;
+
+private:
+    std::vector<bezier::SubPatch> m_patches;
+    TeapotRenderer* m_renderer = nullptr;
+    QPointF m_lastMousePos;
+    bool m_leftMousePressed = false;
+};

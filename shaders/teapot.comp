@@ -39,13 +39,14 @@ struct Ray {
 };
 
 Ray getCameraRay(vec2 uv) {
-    // Simple perspective camera
+    // Simple perspective camera with aspect ratio
     vec3 forward = normalize(pc.camTarget - pc.camPos);
     vec3 right = normalize(cross(forward, vec3(0, 1, 0)));
     vec3 up = cross(right, forward);
 
+    float aspect = float(pc.width) / float(pc.height);
     float fov = 0.8;  // ~45 degrees
-    vec3 dir = normalize(forward + (uv.x - 0.5) * fov * right + (uv.y - 0.5) * fov * up);
+    vec3 dir = normalize(forward + (uv.x - 0.5) * fov * aspect * right + (uv.y - 0.5) * fov * up);
 
     return Ray(pc.camPos, dir);
 }

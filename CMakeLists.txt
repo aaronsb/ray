@@ -111,4 +111,5 @@ add_demo(raydemo ${CMAKE_SOURCE_DIR}/src/apps/raydemo
 
 add_demo(teapot ${CMAKE_SOURCE_DIR}/src/apps/teapot
     src/apps/teapot/main.cpp
+    src/apps/teapot/teapot_renderer.cpp
 )
