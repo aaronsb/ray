@@ -1,7 +1,7 @@
 #pragma once
 
-// Simplified Vulkan renderer for Utah teapot Bezier patch ray tracing
-// Derived from RayTracingRenderer but specialized for patches only
+// Ray - Bezier Patch Ray Tracer
+// Direct ray tracing of parametric surfaces (no tessellation)
 
 #include <QVulkanWindow>
 #include <QElapsedTimer>
@@ -14,8 +14,8 @@ using parametric::Patch;
 using parametric::SubPatch;
 using parametric::BVHNode;
 
-// Push constants matching teapot.comp
-struct TeapotPushConstants {
+// Push constants matching ray.comp
+struct RayPushConstants {
     uint32_t width;
     uint32_t height;
     uint32_t numPatches;
@@ -27,18 +27,17 @@ struct TeapotPushConstants {
 };
 
 // Simple orbit camera
-struct TeapotCamera {
+struct RayCamera {
     float distance = 12.0f;
-    float azimuth = 0.5f;      // Horizontal rotation (slight angle)
-    float elevation = 0.4f;    // Vertical angle (looking slightly down)
+    float azimuth = 0.5f;
+    float elevation = 0.4f;
     float targetX = 0.0f;
-    float targetY = 0.5f;      // Teapot center (bounds: y=-2 to 2, center ~0)
-    float targetZ = 1.5f;      // Teapot Z center (bounds: z=0 to 3.15)
+    float targetY = 0.5f;
+    float targetZ = 1.5f;
 
     void rotate(float dAzimuth, float dElevation) {
         azimuth += dAzimuth;
         elevation += dElevation;
-        // Clamp elevation to avoid gimbal lock
         elevation = std::clamp(elevation, -1.5f, 1.5f);
     }
 
@@ -54,10 +53,10 @@ struct TeapotCamera {
     }
 };
 
-class TeapotRenderer : public QVulkanWindowRenderer {
+class RayRenderer : public QVulkanWindowRenderer {
 public:
-    explicit TeapotRenderer(QVulkanWindow* window,
-                            std::vector<Patch> patches);
+    explicit RayRenderer(QVulkanWindow* window,
+                         std::vector<Patch> patches);
 
     void initResources() override;
     void initSwapChainResources() override;
@@ -65,7 +64,7 @@ public:
     void releaseResources() override;
     void startNextFrame() override;
 
-    TeapotCamera& camera() { return m_camera; }
+    RayCamera& camera() { return m_camera; }
     float fps() const { return m_fps; }
     void markCameraMotion() {
         m_frameIndex = 0;
@@ -79,7 +78,7 @@ private:
     // Patch data
     BezierPatchGroup m_patchGroup;
     std::vector<BezierInstance> m_instances;
-    TeapotCamera m_camera;
+    RayCamera m_camera;
 
     // Vulkan resources
     VkPipeline m_computePipeline = VK_NULL_HANDLE;
@@ -137,7 +136,7 @@ private:
                                VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage);
 };
 
-class TeapotWindow : public QVulkanWindow {
+class RayWindow : public QVulkanWindow {
     Q_OBJECT
 public:
     void setPatches(std::vector<Patch> patches) {
@@ -145,7 +144,7 @@ public:
     }
     QVulkanWindowRenderer* createRenderer() override;
 
-    TeapotRenderer* renderer() const { return m_renderer; }
+    RayRenderer* renderer() const { return m_renderer; }
 
 protected:
     void mousePressEvent(QMouseEvent* event) override;
@@ -156,7 +155,7 @@ protected:
 
 private:
     std::vector<Patch> m_patches;
-    TeapotRenderer* m_renderer = nullptr;
+    RayRenderer* m_renderer = nullptr;
     QPointF m_lastMousePos;
     bool m_leftMousePressed = false;
 };

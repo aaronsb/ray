@@ -1,5 +1,5 @@
-// Utah Teapot - Direct Bezier Patch Ray Tracing
-// No tessellation. Pure mathematical surfaces.
+// Ray - Bezier Patch Ray Tracer
+// Direct ray tracing of parametric surfaces (no tessellation)
 // BezierPatchGroup handles subdivision and BVH construction.
 
 #include <QApplication>
@@ -8,8 +8,8 @@
 #include <cstdio>
 #include <vector>
 
-#include "teapot_patches.h"
-#include "teapot_renderer.h"
+#include "teapot_patches.h"  // Utah teapot bezier patch data
+#include "ray_renderer.h"
 
 using parametric::Vec3;
 using parametric::Patch;
@@ -74,10 +74,10 @@ int main(int argc, char* argv[]) {
 
     // Create window and renderer
     // BezierPatchGroup handles subdivision and BVH internally
-    TeapotWindow window;
+    RayWindow window;
     window.setVulkanInstance(&inst);
     window.setPatches(std::move(patches));
-    window.setTitle("Utah Teapot - Bezier Patch Ray Tracing");
+    window.setTitle("Ray - Bezier Patch Ray Tracing");
     window.resize(800, 600);
     window.show();
 

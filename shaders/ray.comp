@@ -2,6 +2,23 @@
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
+// ============================================================================
+// FEATURE FLAGS - Toggle physical properties (compile-time, zero cost when off)
+// ============================================================================
+#define FEATURE_REFLECTION      1   // Mirror/metal reflection
+#define FEATURE_REFRACTION      1   // Glass transmission
+#define FEATURE_FRESNEL         1   // Fresnel blend at boundaries
+#define FEATURE_SHADOWS         1   // Shadow rays for diffuse
+#define FEATURE_ABSORPTION      1   // Beer's law colored glass
+#define FEATURE_ROUGHNESS       1   // Glossy reflections (GGX)
+#define FEATURE_FLOOR           1   // Checker floor plane
+#define FEATURE_BUMP            1   // Normal perturbation (orange peel, hammered metal)
+#define FEATURE_DISPERSION      0   // Chromatic aberration (TODO)
+#define FEATURE_EMISSION        0   // Self-illuminating materials (TODO)
+
+#define MAX_BOUNCES             4   // Max ray depth
+// ============================================================================
+
 layout(rgba8, set = 0, binding = 0) uniform writeonly image2D outputImage;
 
 // Push constants
@@ -50,7 +67,32 @@ layout(std430, set = 0, binding = 4) readonly buffer InstanceBuffer {
     BezierInstance instances[];
 };
 
-// Rotation functions
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+const float PI = 3.14159265359;
+const float EPSILON = 0.0001;
+const float T_MAX = 1000.0;
+
+// ============================================================================
+// LIBRARY INCLUDES
+// ============================================================================
+#include "includes/random.glsl"
+
+#if FEATURE_BUMP
+#include "includes/noise.glsl"
+#endif
+
+#if FEATURE_ROUGHNESS || FEATURE_FRESNEL
+#include "includes/materials.glsl"
+#endif
+
+#include "includes/geometry.glsl"
+#include "includes/bezier.glsl"
+
+// ============================================================================
+// ROTATION FUNCTIONS (for instance transforms)
+// ============================================================================
 vec3 rotateX(vec3 v, float angle) {
     float c = cos(angle);
     float s = sin(angle);
@@ -69,23 +111,17 @@ vec3 rotateZ(vec3 v, float angle) {
     return vec3(c * v.x - s * v.y, s * v.x + c * v.y, v.z);
 }
 
-// Apply XYZ Euler rotation
 vec3 rotateXYZ(vec3 v, vec3 angles) {
     return rotateZ(rotateY(rotateX(v, angles.x), angles.y), angles.z);
 }
 
-// Apply inverse (ZYX) rotation
 vec3 rotateXYZInverse(vec3 v, vec3 angles) {
     return rotateX(rotateY(rotateZ(v, -angles.z), -angles.y), -angles.x);
 }
 
-const float PI = 3.14159265359;
-const float EPSILON = 0.0001;
-const float T_MAX = 1000.0;
-
-#include "includes/bezier.glsl"
-
-// Simple camera
+// ============================================================================
+// CAMERA
+// ============================================================================
 struct Ray {
     vec3 origin;
     vec3 direction;
@@ -103,7 +139,9 @@ Ray getCameraRay(vec2 uv) {
     return Ray(pc.camPos, dir);
 }
 
-// BVH node helpers
+// ============================================================================
+// BVH TRAVERSAL
+// ============================================================================
 bool isLeaf(uint nodeIdx) {
     return (bvhNodes[nodeIdx].rightOrCount & 0x80000000u) != 0u;
 }
@@ -112,7 +150,6 @@ uint patchCount(uint nodeIdx) {
     return bvhNodes[nodeIdx].rightOrCount & 0x7FFFFFFFu;
 }
 
-// Hit test single instance (BVH traversal in local space)
 bool hitInstance(Ray localRay, float tMin, float tMax,
                  out float hitT, out vec3 hitN, out float hitU, out float hitV) {
     bool hit = false;
@@ -165,7 +202,6 @@ bool hitInstance(Ray localRay, float tMin, float tMax,
     return hit;
 }
 
-// Hit test all instances
 bool hitAllInstances(Ray worldRay, float tMin, float tMax,
                      out float hitT, out vec3 hitN, out uint hitInstanceId) {
     bool hit = false;
@@ -174,26 +210,21 @@ bool hitAllInstances(Ray worldRay, float tMin, float tMax,
     for (uint i = 0; i < pc.numInstances; i++) {
         BezierInstance inst = instances[i];
 
-        // Transform ray to instance local space (inverse of instance transform)
-        // Instance transform: scale -> rotate (XYZ) -> translate
-        // Inverse: inverse_translate -> inverse_rotate (ZYX with negated angles) -> inverse_scale
         Ray localRay;
         vec3 translated = worldRay.origin - inst.position;
         localRay.origin = rotateXYZInverse(translated, inst.rotation) / inst.scale;
         localRay.direction = rotateXYZInverse(worldRay.direction, inst.rotation);
 
-        float localTMax = closestT / inst.scale;  // Adjust tMax for scale
+        float localTMax = closestT / inst.scale;
 
         float t, u, v;
         vec3 n;
         if (hitInstance(localRay, tMin / inst.scale, localTMax, t, n, u, v)) {
-            // Transform t back to world space
             float worldT = t * inst.scale;
             if (worldT < closestT) {
                 hit = true;
                 closestT = worldT;
                 hitT = worldT;
-                // Transform normal back to world space
                 hitN = rotateXYZ(n, inst.rotation);
                 hitInstanceId = i;
             }
@@ -203,23 +234,22 @@ bool hitAllInstances(Ray worldRay, float tMin, float tMax,
     return hit;
 }
 
-// Fresnel reflectance (Schlick approximation)
-float fresnel(float cosTheta, float ior) {
-    float r0 = (1.0 - ior) / (1.0 + ior);
-    r0 = r0 * r0;
-    return r0 + (1.0 - r0) * pow(1.0 - cosTheta, 5.0);
-}
+// ============================================================================
+// MATERIAL TYPES
+// ============================================================================
+#define MAT_DIFFUSE  0
+#define MAT_METAL    1
+#define MAT_GLASS    2
+#define MAT_EMISSIVE 3
 
-// Sky/environment color
-vec3 skyColor(vec3 dir) {
-    float t = 0.5 * (dir.y + 1.0);
-    return mix(vec3(1.0), vec3(0.5, 0.7, 1.0), t);
-}
-
-// Material types: 0=diffuse, 1=metal, 2=glass
+// ============================================================================
+// MAIN RENDER LOOP
+// ============================================================================
 void main() {
     ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
     if (pixel.x >= int(pc.width) || pixel.y >= int(pc.height)) return;
+
+    initRNG(pixel);
 
     vec2 uv = vec2(pixel) / vec2(pc.width, pc.height);
     uv.y = 1.0 - uv.y;
@@ -228,55 +258,124 @@ void main() {
     vec3 color = vec3(0.0);
     vec3 throughput = vec3(1.0);
 
-    // Material properties per instance
-    // Instance 0: diffuse ceramic, 1: metal, 2: glass, 3: diffuse
-    uint materialTypes[4] = uint[](0, 1, 2, 0);
-    vec3 baseColors[4] = vec3[](
-        vec3(0.8, 0.6, 0.4),   // Ceramic
-        vec3(0.95, 0.93, 0.88), // Silver metal
-        vec3(1.0, 1.0, 1.0),   // Glass (white = clear)
-        vec3(0.8, 0.4, 0.6)    // Pink ceramic
+    // Material properties per instance - 6 teapots showcasing different effects
+    uint materialTypes[6] = uint[](MAT_DIFFUSE, MAT_METAL, MAT_METAL, MAT_METAL, MAT_GLASS, MAT_GLASS);
+    vec3 baseColors[6] = vec3[](
+        vec3(0.85, 0.55, 0.35),  // 0: Terracotta ceramic
+        vec3(0.95, 0.95, 0.97),  // 1: Polished silver
+        vec3(0.83, 0.69, 0.22),  // 2: Brushed gold
+        vec3(0.85, 0.55, 0.40),  // 3: Hammered copper
+        vec3(1.0, 1.0, 1.0),     // 4: Clear glass
+        vec3(0.4, 0.9, 0.5)      // 5: Green glass (for absorption tint)
     );
-
-    const int MAX_BOUNCES = 4;
+    float roughnessVals[6] = float[](0.0, 0.0, 0.25, 0.02, 0.0, 0.0);
+    float bumpScale[6] = float[](0.0, 0.0, 0.0, 25.0, 0.0, 0.0);
+    float bumpStrength[6] = float[](0.0, 0.0, 0.0, 0.4, 0.0, 0.0);
 
     for (int bounce = 0; bounce < MAX_BOUNCES; bounce++) {
         float t;
         vec3 normal;
         uint instanceId;
+        bool hitFloorFlag = false;
 
-        if (!hitAllInstances(ray, EPSILON, T_MAX, t, normal, instanceId)) {
-            color += throughput * skyColor(ray.direction);
+        bool hitBezier = hitAllInstances(ray, EPSILON, T_MAX, t, normal, instanceId);
+
+#if FEATURE_FLOOR
+        float floorT;
+        vec3 floorN;
+        if (hitFloorPlane(ray.origin, ray.direction, -1.0, EPSILON, hitBezier ? t : T_MAX, floorT, floorN)) {
+            t = floorT;
+            normal = floorN;
+            hitFloorFlag = true;
+            hitBezier = false;
+        }
+#endif
+
+        if (!hitBezier && !hitFloorFlag) {
+            color += throughput * skyGradient(ray.direction);
             break;
         }
 
         vec3 hitPoint = ray.origin + t * ray.direction;
-        uint matType = materialTypes[instanceId % 4];
-        vec3 baseColor = baseColors[instanceId % 4];
 
-        if (matType == 0) {
-            // Diffuse - direct lighting only (no GI for speed)
+        // Floor material
+#if FEATURE_FLOOR
+        if (hitFloorFlag) {
+            vec3 floorColor = checkerPattern(hitPoint, 2.0, vec3(0.9), vec3(0.1));
             vec3 lightDir = normalize(vec3(1, 2, 1));
             float NdotL = max(dot(normal, lightDir), 0.0);
 
-            // Shadow ray
+            float shadow = 1.0;
+#if FEATURE_SHADOWS
             float shadowT;
             vec3 shadowN;
             uint shadowId;
-            float shadow = hitAllInstances(Ray(hitPoint + normal * EPSILON * 2.0, lightDir),
-                                           EPSILON, T_MAX, shadowT, shadowN, shadowId) ? 0.3 : 1.0;
+            if (hitAllInstances(Ray(hitPoint + normal * EPSILON * 2.0, lightDir),
+                                EPSILON, T_MAX, shadowT, shadowN, shadowId)) {
+                shadow = 0.3;
+            }
+#endif
+            color += throughput * floorColor * (0.2 + 0.8 * NdotL * shadow);
+            break;
+        }
+#endif
 
+        uint matType = materialTypes[instanceId % 6];
+        vec3 baseColor = baseColors[instanceId % 6];
+
+#if FEATURE_BUMP
+        float bs = bumpScale[instanceId % 6];
+        float bstr = bumpStrength[instanceId % 6];
+        if (bstr > 0.0) {
+            normal = bumpNormal(hitPoint, normal, bs, bstr);
+        }
+#endif
+
+        // ----- DIFFUSE -----
+        if (matType == MAT_DIFFUSE) {
+            vec3 lightDir = normalize(vec3(1, 2, 1));
+            float NdotL = max(dot(normal, lightDir), 0.0);
+
+            float shadow = 1.0;
+#if FEATURE_SHADOWS
+            float shadowT;
+            vec3 shadowN;
+            uint shadowId;
+            if (hitAllInstances(Ray(hitPoint + normal * EPSILON * 2.0, lightDir),
+                                EPSILON, T_MAX, shadowT, shadowN, shadowId)) {
+                shadow = 0.3;
+            }
+#endif
             color += throughput * baseColor * (0.15 + 0.85 * NdotL * shadow);
-            break;  // No further bounces for diffuse
+            break;
+        }
 
-        } else if (matType == 1) {
-            // Metal - perfect reflection
+        // ----- METAL -----
+#if FEATURE_REFLECTION
+        else if (matType == MAT_METAL) {
             ray.origin = hitPoint + normal * EPSILON * 2.0;
-            ray.direction = reflect(ray.direction, normal);
-            throughput *= baseColor;
 
-        } else if (matType == 2) {
-            // Glass - refraction with Fresnel
+#if FEATURE_ROUGHNESS
+            float r = roughnessVals[instanceId % 6];
+            if (r > 0.001) {
+                vec3 H = sampleGGX(normal, r);
+                ray.direction = reflect(ray.direction, H);
+                if (dot(ray.direction, normal) < 0.0) {
+                    ray.direction = reflect(ray.direction, normal);
+                }
+            } else {
+                ray.direction = reflect(ray.direction, normal);
+            }
+#else
+            ray.direction = reflect(ray.direction, normal);
+#endif
+            throughput *= baseColor;
+        }
+#endif
+
+        // ----- GLASS -----
+#if FEATURE_REFRACTION
+        else if (matType == MAT_GLASS) {
             float ior = 1.5;
             float cosTheta = dot(-ray.direction, normal);
             bool entering = cosTheta > 0.0;
@@ -285,16 +384,26 @@ void main() {
             float eta = entering ? (1.0 / ior) : ior;
             cosTheta = abs(cosTheta);
 
-            float F = fresnel(cosTheta, ior);
+#if FEATURE_ABSORPTION
+            if (!entering) {
+                vec3 absorptionCoeff = vec3(0.2, 0.5, 0.8);
+                throughput *= exp(-absorptionCoeff * t);
+            }
+#endif
 
-            // Simple: reflect if Fresnel says so, else refract
-            if (F > 0.5) {
+#if FEATURE_FRESNEL
+            float F = fresnel(cosTheta, ior);
+            bool doReflect = (F > 0.5);
+#else
+            bool doReflect = false;
+#endif
+
+            if (doReflect) {
                 ray.origin = hitPoint + n * EPSILON * 2.0;
                 ray.direction = reflect(ray.direction, n);
             } else {
                 vec3 refracted = refract(ray.direction, n, eta);
                 if (length(refracted) < 0.5) {
-                    // Total internal reflection
                     ray.origin = hitPoint + n * EPSILON * 2.0;
                     ray.direction = reflect(ray.direction, n);
                 } else {
@@ -304,6 +413,15 @@ void main() {
             }
             throughput *= baseColor;
         }
+#endif
+
+        // ----- EMISSIVE -----
+#if FEATURE_EMISSION
+        else if (matType == MAT_EMISSIVE) {
+            color += throughput * baseColor * 5.0;
+            break;
+        }
+#endif
     }
 
     color = pow(clamp(color, 0.0, 1.0), vec3(1.0 / 2.2));

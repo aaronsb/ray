@@ -1,4 +1,4 @@
-#include "teapot_renderer.h"
+#include "ray_renderer.h"
 #include <QFile>
 #include <QVulkanFunctions>
 #include <QMouseEvent>
@@ -7,40 +7,44 @@
 #include <QCoreApplication>
 #include <cstring>
 
-TeapotRenderer::TeapotRenderer(QVulkanWindow* window,
+RayRenderer::RayRenderer(QVulkanWindow* window,
                                std::vector<Patch> patches)
     : m_window(window)
 {
     m_patchGroup.build(patches);
 }
 
-void TeapotRenderer::initResources() {
+void RayRenderer::initResources() {
     m_devFuncs = m_window->vulkanInstance()->deviceFunctions(m_window->device());
     m_frameTimer.start();
 
     const float PI = 3.14159265f;
 
-    // Create multiple teapot instances with different rotations
+    // Create teapot instances - each showcases a different material effect
     // Format: {posX, posY, posZ, scale, rotX, rotY, rotZ, materialId}
     m_instances = {
-        {0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0},              // Center
-        {-6.0f, 0.0f, 0.0f, 0.7f, 0.0f, PI * 0.5f, 0.0f, 1},        // Left, Y rotation
-        {6.0f, 0.0f, 0.0f, 0.7f, PI * 0.25f, 0.0f, 0.0f, 2},        // Right, X rotation (tilted)
-        {0.0f, 0.0f, -6.0f, 0.5f, 0.0f, 0.0f, PI * 0.3f, 3},        // Back, Z rotation
+        // Front row
+        {-4.0f, 0.0f, 4.0f, 0.6f, 0.0f, PI * 0.3f, 0.0f, 0},   // 0: Diffuse ceramic
+        { 0.0f, 0.0f, 4.0f, 0.6f, 0.0f, 0.0f, 0.0f, 1},        // 1: Polished mirror metal
+        { 4.0f, 0.0f, 4.0f, 0.6f, 0.0f, -PI * 0.3f, 0.0f, 2},  // 2: Rough metal (sandpaper)
+        // Back row
+        {-4.0f, 0.0f, -2.0f, 0.6f, 0.0f, PI * 0.8f, 0.0f, 3},  // 3: Hammered metal (bump)
+        { 0.0f, 0.0f, -2.0f, 0.6f, 0.0f, PI, 0.0f, 4},         // 4: Clear glass
+        { 4.0f, 0.0f, -2.0f, 0.6f, 0.0f, -PI * 0.8f, 0.0f, 5}, // 5: Colored glass (absorption)
     };
 
     createPatchBuffers();
     createComputePipeline();
 }
 
-void TeapotRenderer::initSwapChainResources() {
+void RayRenderer::initSwapChainResources() {
     createStorageImage();
     createDescriptorSet();
     m_frameIndex = 0;
     m_needsImageTransition = true;
 }
 
-void TeapotRenderer::releaseSwapChainResources() {
+void RayRenderer::releaseSwapChainResources() {
     VkDevice dev = m_window->device();
 
     if (m_storageImageView) {
@@ -62,7 +66,7 @@ void TeapotRenderer::releaseSwapChainResources() {
     }
 }
 
-void TeapotRenderer::releaseResources() {
+void RayRenderer::releaseResources() {
     VkDevice dev = m_window->device();
 
     if (m_computePipeline) {
@@ -112,7 +116,7 @@ void TeapotRenderer::releaseResources() {
     }
 }
 
-void TeapotRenderer::startNextFrame() {
+void RayRenderer::startNextFrame() {
     // Calculate FPS
     qint64 now = m_frameTimer.nsecsElapsed();
     if (m_lastFrameTime > 0) {
@@ -133,7 +137,7 @@ void TeapotRenderer::startNextFrame() {
     m_window->requestUpdate();
 }
 
-VkShaderModule TeapotRenderer::createShaderModule(const QString& path) {
+VkShaderModule RayRenderer::createShaderModule(const QString& path) {
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) {
         qFatal("Failed to open shader file: %s", qPrintable(path));
@@ -152,7 +156,7 @@ VkShaderModule TeapotRenderer::createShaderModule(const QString& path) {
     return shaderModule;
 }
 
-void TeapotRenderer::createStorageImage() {
+void RayRenderer::createStorageImage() {
     QSize sz = m_window->swapChainImageSize();
 
     createImage(sz.width(), sz.height(), VK_FORMAT_R8G8B8A8_UNORM,
@@ -163,7 +167,7 @@ void TeapotRenderer::createStorageImage() {
     m_needsImageTransition = true;
 }
 
-void TeapotRenderer::createPatchBuffers() {
+void RayRenderer::createPatchBuffers() {
     VkDevice dev = m_window->device();
 
     // Get data from patch group
@@ -221,7 +225,7 @@ void TeapotRenderer::createPatchBuffers() {
            (patchDataSize + bvhSize + indexSize + instanceSize) / 1024.0f);
 }
 
-void TeapotRenderer::createDescriptorSet() {
+void RayRenderer::createDescriptorSet() {
     VkDevice dev = m_window->device();
 
     // Create descriptor pool (1 image + 4 buffers)
@@ -314,7 +318,7 @@ void TeapotRenderer::createDescriptorSet() {
     m_devFuncs->vkUpdateDescriptorSets(dev, writes.size(), writes.data(), 0, nullptr);
 }
 
-void TeapotRenderer::createComputePipeline() {
+void RayRenderer::createComputePipeline() {
     VkDevice dev = m_window->device();
 
     // Descriptor set layout (5 bindings)
@@ -357,7 +361,7 @@ void TeapotRenderer::createComputePipeline() {
     VkPushConstantRange pushConstantRange{};
     pushConstantRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     pushConstantRange.offset = 0;
-    pushConstantRange.size = sizeof(TeapotPushConstants);
+    pushConstantRange.size = sizeof(RayPushConstants);
 
     VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
     pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -370,7 +374,7 @@ void TeapotRenderer::createComputePipeline() {
         qFatal("Failed to create pipeline layout");
     }
 
-    QString shaderPath = QCoreApplication::applicationDirPath() + "/shaders/teapot.spv";
+    QString shaderPath = QCoreApplication::applicationDirPath() + "/shaders/ray.spv";
     VkShaderModule shaderModule = createShaderModule(shaderPath);
 
     VkPipelineShaderStageCreateInfo stageInfo{};
@@ -391,7 +395,7 @@ void TeapotRenderer::createComputePipeline() {
     m_devFuncs->vkDestroyShaderModule(dev, shaderModule, nullptr);
 }
 
-void TeapotRenderer::recordComputeCommands(VkCommandBuffer cmdBuf) {
+void RayRenderer::recordComputeCommands(VkCommandBuffer cmdBuf) {
     QSize sz = m_window->swapChainImageSize();
 
     if (m_needsImageTransition) {
@@ -406,7 +410,7 @@ void TeapotRenderer::recordComputeCommands(VkCommandBuffer cmdBuf) {
     m_devFuncs->vkCmdBindDescriptorSets(cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE,
         m_pipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
 
-    TeapotPushConstants pc{};
+    RayPushConstants pc{};
     pc.width = sz.width();
     pc.height = sz.height();
     pc.numPatches = m_patchGroup.subPatchCount();
@@ -420,7 +424,7 @@ void TeapotRenderer::recordComputeCommands(VkCommandBuffer cmdBuf) {
     pc.numInstances = static_cast<uint32_t>(m_instances.size());
 
     m_devFuncs->vkCmdPushConstants(cmdBuf, m_pipelineLayout,
-        VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(TeapotPushConstants), &pc);
+        VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RayPushConstants), &pc);
 
     uint32_t groupCountX = (sz.width() + 15) / 16;
     uint32_t groupCountY = (sz.height() + 15) / 16;
@@ -491,7 +495,7 @@ void TeapotRenderer::recordComputeCommands(VkCommandBuffer cmdBuf) {
         0, 0, nullptr, 0, nullptr, 1, &barrier);
 }
 
-uint32_t TeapotRenderer::findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
+uint32_t RayRenderer::findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
     VkPhysicalDeviceMemoryProperties memProperties;
     m_window->vulkanInstance()->functions()->vkGetPhysicalDeviceMemoryProperties(
         m_window->physicalDevice(), &memProperties);
@@ -506,7 +510,7 @@ uint32_t TeapotRenderer::findMemoryType(uint32_t typeFilter, VkMemoryPropertyFla
     return 0;
 }
 
-void TeapotRenderer::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
+void RayRenderer::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
                                    VkMemoryPropertyFlags properties,
                                    VkBuffer& buffer, VkDeviceMemory& memory) {
     VkDevice dev = m_window->device();
@@ -536,7 +540,7 @@ void TeapotRenderer::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
     m_devFuncs->vkBindBufferMemory(dev, buffer, memory, 0);
 }
 
-void TeapotRenderer::createImage(uint32_t width, uint32_t height, VkFormat format,
+void RayRenderer::createImage(uint32_t width, uint32_t height, VkFormat format,
                                   VkImageUsageFlags usage,
                                   VkImage& image, VkDeviceMemory& memory) {
     VkDevice dev = m_window->device();
@@ -576,7 +580,7 @@ void TeapotRenderer::createImage(uint32_t width, uint32_t height, VkFormat forma
     m_devFuncs->vkBindImageMemory(dev, image, memory, 0);
 }
 
-VkImageView TeapotRenderer::createImageView(VkImage image, VkFormat format) {
+VkImageView RayRenderer::createImageView(VkImage image, VkFormat format) {
     VkImageViewCreateInfo viewInfo{};
     viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     viewInfo.image = image;
@@ -595,7 +599,7 @@ VkImageView TeapotRenderer::createImageView(VkImage image, VkFormat format) {
     return imageView;
 }
 
-void TeapotRenderer::transitionImageLayout(VkCommandBuffer cmdBuf, VkImage image,
+void RayRenderer::transitionImageLayout(VkCommandBuffer cmdBuf, VkImage image,
                                             VkImageLayout oldLayout, VkImageLayout newLayout,
                                             VkAccessFlags srcAccess, VkAccessFlags dstAccess,
                                             VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage) {
@@ -618,27 +622,27 @@ void TeapotRenderer::transitionImageLayout(VkCommandBuffer cmdBuf, VkImage image
         0, 0, nullptr, 0, nullptr, 1, &barrier);
 }
 
-// TeapotWindow implementation
+// RayWindow implementation
 
-QVulkanWindowRenderer* TeapotWindow::createRenderer() {
-    m_renderer = new TeapotRenderer(this, std::move(m_patches));
+QVulkanWindowRenderer* RayWindow::createRenderer() {
+    m_renderer = new RayRenderer(this, std::move(m_patches));
     return m_renderer;
 }
 
-void TeapotWindow::mousePressEvent(QMouseEvent* event) {
+void RayWindow::mousePressEvent(QMouseEvent* event) {
     m_lastMousePos = event->position();
     if (event->button() == Qt::LeftButton) {
         m_leftMousePressed = true;
     }
 }
 
-void TeapotWindow::mouseReleaseEvent(QMouseEvent* event) {
+void RayWindow::mouseReleaseEvent(QMouseEvent* event) {
     if (event->button() == Qt::LeftButton) {
         m_leftMousePressed = false;
     }
 }
 
-void TeapotWindow::mouseMoveEvent(QMouseEvent* event) {
+void RayWindow::mouseMoveEvent(QMouseEvent* event) {
     if (!m_renderer) return;
 
     QPointF delta = event->position() - m_lastMousePos;
@@ -651,7 +655,7 @@ void TeapotWindow::mouseMoveEvent(QMouseEvent* event) {
     }
 }
 
-void TeapotWindow::wheelEvent(QWheelEvent* event) {
+void RayWindow::wheelEvent(QWheelEvent* event) {
     if (m_renderer) {
         float delta = event->angleDelta().y() / 120.0f;
         m_renderer->camera().zoom(delta);
@@ -659,7 +663,7 @@ void TeapotWindow::wheelEvent(QWheelEvent* event) {
     }
 }
 
-void TeapotWindow::keyPressEvent(QKeyEvent* event) {
+void RayWindow::keyPressEvent(QKeyEvent* event) {
     if (event->key() == Qt::Key_Escape) {
         close();
     }

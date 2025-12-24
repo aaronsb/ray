@@ -30,8 +30,7 @@ set(SHADER_BINARY_DIR ${CMAKE_BINARY_DIR}/shaders)
 file(MAKE_DIRECTORY ${SHADER_BINARY_DIR})
 
 set(SHADERS
-    raytrace.comp
-    teapot.comp
+    ray.comp
 )
 
 foreach(SHADER ${SHADERS})
@@ -104,12 +103,7 @@ endfunction()
 
 # ============ APPS ============
 
-add_demo(raydemo ${CMAKE_SOURCE_DIR}/src/apps/raydemo
-    src/apps/raydemo/main.cpp
-    src/apps/raydemo/test_scene.cpp
-)
-
-add_demo(teapot ${CMAKE_SOURCE_DIR}/src/apps/teapot
-    src/apps/teapot/main.cpp
-    src/apps/teapot/teapot_renderer.cpp
+add_demo(ray ${CMAKE_SOURCE_DIR}/src/apps/ray
+    src/apps/ray/main.cpp
+    src/apps/ray/ray_renderer.cpp
 )
