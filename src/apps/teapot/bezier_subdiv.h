@@ -44,6 +44,8 @@ struct AABB {
 
     float diagonal() const { return (max - min).length(); }
 
+    static constexpr float EPSILON = 0.01f;  // Larger padding to prevent gaps between adjacent patches
+
     static AABB fromPatch(const Patch& p) {
         AABB box;
         box.min = box.max = p.cp[0];
@@ -51,6 +53,13 @@ struct AABB {
             box.min = Vec3::min(box.min, p.cp[i]);
             box.max = Vec3::max(box.max, p.cp[i]);
         }
+        // Pad to ensure adjacent patches overlap slightly
+        box.min.x -= EPSILON;
+        box.min.y -= EPSILON;
+        box.min.z -= EPSILON;
+        box.max.x += EPSILON;
+        box.max.y += EPSILON;
+        box.max.z += EPSILON;
         return box;
     }
 };

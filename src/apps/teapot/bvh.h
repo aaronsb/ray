@@ -36,6 +36,9 @@ struct BuildContext {
     }
 };
 
+// Small epsilon to pad AABBs - prevents edge artifacts from floating point precision
+constexpr float AABB_EPSILON = 1e-4f;
+
 inline bezier::AABB computeBounds(const BuildContext& ctx, uint32_t start, uint32_t count) {
     bezier::AABB bounds;
     bounds.min = bezier::Vec3(1e30f, 1e30f, 1e30f);
@@ -46,6 +49,13 @@ inline bezier::AABB computeBounds(const BuildContext& ctx, uint32_t start, uint3
         bounds.min = bezier::Vec3::min(bounds.min, patch.bounds.min);
         bounds.max = bezier::Vec3::max(bounds.max, patch.bounds.max);
     }
+    // Slight expansion to catch edge rays
+    bounds.min.x -= AABB_EPSILON;
+    bounds.min.y -= AABB_EPSILON;
+    bounds.min.z -= AABB_EPSILON;
+    bounds.max.x += AABB_EPSILON;
+    bounds.max.y += AABB_EPSILON;
+    bounds.max.z += AABB_EPSILON;
     return bounds;
 }
 

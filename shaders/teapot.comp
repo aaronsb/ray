@@ -73,9 +73,11 @@ uint patchCount(uint nodeIdx) {
 }
 
 // Check all patches for intersection using BVH acceleration
-bool hitTeapot(Ray r, float tMin, float tMax,
+// Returns: 0 = miss, 1 = hit, 2 = hit AABB but missed surface (debug)
+int hitTeapotDebug(Ray r, float tMin, float tMax,
                out float hitT, out vec3 hitN, out float hitU, out float hitV, out uint hitPatch) {
     bool hit = false;
+    bool hitAnyAABB = false;
     float closestT = tMax;
 
     // Stack-based BVH traversal
@@ -96,6 +98,8 @@ bool hitTeapot(Ray r, float tMin, float tMax,
         }
 
         if (isLeaf(nodeIdx)) {
+            hitAnyAABB = true;  // We reached a leaf AABB
+
             // Test all patches in this leaf
             uint first = node.leftOrFirst;
             uint count = patchCount(nodeIdx);
@@ -128,7 +132,9 @@ bool hitTeapot(Ray r, float tMin, float tMax,
         }
     }
 
-    return hit;
+    if (hit) return 1;
+    if (hitAnyAABB) return 2;  // Hit AABB but missed surface - Newton failed!
+    return 0;
 }
 
 void main() {
@@ -146,18 +152,17 @@ void main() {
     vec3 normal;
     uint patchId;
 
-    if (hitTeapot(ray, EPSILON, T_MAX, t, normal, u, v, patchId)) {
-        // Simple shading
+    int result = hitTeapotDebug(ray, EPSILON, T_MAX, t, normal, u, v, patchId);
+
+    if (result == 1) {
+        // Normal shading
         vec3 lightDir = normalize(vec3(1, 2, 1));
         float NdotL = max(dot(normal, lightDir), 0.0);
 
-        // Base color varies by patch for visualization
-        vec3 baseColor = vec3(0.8, 0.6, 0.4);  // Ceramic-ish
+        vec3 baseColor = vec3(0.8, 0.6, 0.4);  // Ceramic
 
-        // Ambient + diffuse
         color = baseColor * (0.2 + 0.8 * NdotL);
 
-        // Specular highlight
         vec3 viewDir = -ray.direction;
         vec3 halfVec = normalize(lightDir + viewDir);
         float spec = pow(max(dot(normal, halfVec), 0.0), 64.0);

@@ -88,17 +88,32 @@ bool hitAABB(vec3 bmin, vec3 bmax, vec3 ro, vec3 rd, float tMin, float tMax) {
     return tExit >= tEnter && tExit >= tMin && tEnter <= tMax;
 }
 
-// Kajiya's 2-plane formulation: reduces 3 unknowns (u,v,t) to 2 (u,v)
-// More stable than the 3x3 Jacobian approach
+// Parameter transformation (Tang et al. 2023): maps unbounded (α,β) to bounded (u,v) ∈ (0,1)
+// u = 1/(e^(-4α) + 1), v = 1/(e^(-4β) + 1)
+// This prevents parameters from escaping [0,1] during Newton iteration
+float alphaToU(float alpha) {
+    return 1.0 / (exp(-4.0 * alpha) + 1.0);
+}
+float uToAlpha(float u) {
+    return -log(1.0 / u - 1.0) / 4.0;
+}
+// Derivative: du/dα = 4u(1-u)
+float duDalpha(float u) {
+    return 4.0 * u * (1.0 - u);
+}
+
+// Simple Newton-Raphson with Kajiya's 2-plane formulation
+// No fancy transformations - just basic clamped iteration
 bool tryNewtonKajiya(vec3 cp[16], vec3 ro, vec3 rd,
                      vec3 N1, vec3 N2, float d1, float d2,
                      float tMin, float tMax,
                      float startU, float startV,
                      out float hitT, out float hitU, out float hitV, out vec3 hitN) {
+
     float u = startU;
     float v = startV;
 
-    const int MAX_ITER = 12;
+    const int MAX_ITER = 10;
     const float EPSILON = 1e-5;
 
     for (int iter = 0; iter < MAX_ITER; iter++) {
@@ -112,10 +127,15 @@ bool tryNewtonKajiya(vec3 cp[16], vec3 ro, vec3 rd,
 
         // Check convergence
         if (abs(f1) < EPSILON && abs(f2) < EPSILON) {
+            // Verify (u,v) is in valid range
+            if (u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0) {
+                return false;  // Converged outside patch
+            }
+
             // Compute t from converged surface point
             float t = dot(S - ro, rd) / dot(rd, rd);
 
-            if (u >= 0.0 && u <= 1.0 && v >= 0.0 && v <= 1.0 && t >= tMin && t <= tMax) {
+            if (t >= tMin && t <= tMax) {
                 hitT = t;
                 hitU = u;
                 hitV = v;
@@ -127,7 +147,7 @@ bool tryNewtonKajiya(vec3 cp[16], vec3 ro, vec3 rd,
             return false;
         }
 
-        // 2x2 Jacobian: J = [N1·Su, N1·Sv; N2·Su, N2·Sv]
+        // Standard Jacobian (no transformation)
         float j11 = dot(N1, Su), j12 = dot(N1, Sv);
         float j21 = dot(N2, Su), j22 = dot(N2, Sv);
 
@@ -141,36 +161,12 @@ bool tryNewtonKajiya(vec3 cp[16], vec3 ro, vec3 rd,
         u -= du;
         v -= dv;
 
-        // Early exit if diverging far from valid domain
-        if (u < -0.5 || u > 1.5 || v < -0.5 || v > 1.5) {
-            return false;
-        }
+        // Clamp to [0,1] - if we go outside, we're looking at wrong patch
+        u = clamp(u, 0.0, 1.0);
+        v = clamp(v, 0.0, 1.0);
     }
 
-    // Check if we got close enough after max iterations
-    float fu = clamp(u, 0.0, 1.0);
-    float fv = clamp(v, 0.0, 1.0);
-    if (abs(u - fu) < 0.05 && abs(v - fv) < 0.05) {
-        vec3 S = evalBezierPatch(cp, fu, fv);
-        float f1 = dot(N1, S) + d1;
-        float f2 = dot(N2, S) + d2;
-        if (abs(f1) < EPSILON * 10.0 && abs(f2) < EPSILON * 10.0) {
-            float t = dot(S - ro, rd) / dot(rd, rd);
-            if (t >= tMin && t <= tMax) {
-                hitT = t;
-                hitU = fu;
-                hitV = fv;
-                vec3 Su = evalBezierPatchDu(cp, fu, fv);
-                vec3 Sv = evalBezierPatchDv(cp, fu, fv);
-                vec3 n = normalize(cross(Su, Sv));
-                if (dot(n, rd) > 0.0) n = -n;
-                hitN = n;
-                return true;
-            }
-        }
-    }
-
-    return false;
+    return false;  // Didn't converge
 }
 
 // Ray-Bezier patch intersection using Kajiya's 2-plane Newton with multiple guesses
@@ -188,33 +184,22 @@ bool hitBezierPatch(vec3 cp[16], vec3 ro, vec3 rd, float tMin, float tMax,
     float d1 = -dot(N1, ro);
     float d2 = -dot(N2, ro);
 
-    float bestT = tMax + 1.0;
+    float bestT = tMax;  // Use actual tMax, not tMax + 1!
     float bestU, bestV;
     vec3 bestN;
     bool found = false;
 
-    // Try multiple starting points
-    float startPoints[5*2] = float[](
-        0.5, 0.5,   // center
-        0.2, 0.2,   // corners (inset from edges)
-        0.8, 0.2,
-        0.2, 0.8,
-        0.8, 0.8
-    );
+    float t, u, v;
+    vec3 n;
 
-    for (int i = 0; i < 5; i++) {
-        float t, u, v;
-        vec3 n;
-        if (tryNewtonKajiya(cp, ro, rd, N1, N2, d1, d2, tMin, bestT,
-                            startPoints[i*2], startPoints[i*2+1], t, u, v, n)) {
-            if (t < bestT) {
-                bestT = t;
-                bestU = u;
-                bestV = v;
-                bestN = n;
-                found = true;
-            }
-        }
+    // Single starting point at center - sufficient for well-subdivided patches
+    if (tryNewtonKajiya(cp, ro, rd, N1, N2, d1, d2, tMin, bestT,
+                        0.5, 0.5, t, u, v, n)) {
+        bestT = t;
+        bestU = u;
+        bestV = v;
+        bestN = n;
+        found = true;
     }
 
     if (found) {

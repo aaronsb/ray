@@ -58,7 +58,7 @@ int main(int argc, char* argv[]) {
     // Subdivide for GPU
     // Lower threshold = more subdivision = better Newton convergence for curved parts
     int maxDepth = 4;  // 4^4 = 256x subdivision per patch max
-    float flatnessThreshold = 0.08f;  // Smaller patches for spout/handle convergence
+    float flatnessThreshold = 0.05f;  // Reasonable subdivision
 
     printf("\nSubdividing (maxDepth=%d, flatness=%.2f)...\n", maxDepth, flatnessThreshold);
 
