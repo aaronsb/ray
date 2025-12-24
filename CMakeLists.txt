@@ -50,18 +50,17 @@ endforeach()
 
 add_custom_target(shaders DEPENDS ${SHADER_SPV_FILES})
 
-# ============ CORE LIBRARY ============
+# ============ CORE LIBRARY (header-only) ============
 
-add_library(raycore STATIC
-    src/core/renderer.cpp
-)
+add_library(raycore INTERFACE)
 
-target_include_directories(raycore PUBLIC
+target_include_directories(raycore INTERFACE
     ${CMAKE_SOURCE_DIR}/src/core
+    ${CMAKE_SOURCE_DIR}/src/parametric
     ${Vulkan_INCLUDE_DIRS}
 )
 
-target_link_libraries(raycore PUBLIC
+target_link_libraries(raycore INTERFACE
     Qt6::Core
     Qt6::Gui
     Vulkan::Vulkan
@@ -70,10 +69,6 @@ target_link_libraries(raycore PUBLIC
 # Enable LTO for release builds
 include(CheckIPOSupported)
 check_ipo_supported(RESULT IPO_SUPPORTED)
-if(IPO_SUPPORTED)
-    set_property(TARGET raycore PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
-    set_property(TARGET raycore PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO TRUE)
-endif()
 
 # ============ DEMO HELPER FUNCTION ============
 
