@@ -11,6 +11,7 @@ This directory contains Architecture Decision Records (ADRs) documenting signifi
 | [ADR-003](ADR-003-modular-architecture.md) | Modular Architecture | Accepted | Refactor monolith into separate modules (geometry, materials, lights, scene, etc.) |
 | [ADR-004](ADR-004-geometry-primitives.md) | Geometry Primitives | Proposed | Define primitive types: analytic (sphere, box, cylinder), voxel chunks, triangle meshes |
 | [ADR-005](ADR-005-multi-target-build.md) | Multi-Target Build | Accepted | Static library + multiple demo executables sharing core renderer |
+| [ADR-006](ADR-006-shape-representation.md) | Shape Representation | Proposed | Strategies for complex shapes: analytic, SDF, mesh, NURBS, subdivision |
 
 ## Status Legend
 
