@@ -60,6 +60,20 @@ void RayRenderer::releaseSwapChainResources() {
         m_storageImageMemory = VK_NULL_HANDLE;
     }
 
+    // Accumulation buffer cleanup
+    if (m_accumImageView) {
+        m_devFuncs->vkDestroyImageView(dev, m_accumImageView, nullptr);
+        m_accumImageView = VK_NULL_HANDLE;
+    }
+    if (m_accumImage) {
+        m_devFuncs->vkDestroyImage(dev, m_accumImage, nullptr);
+        m_accumImage = VK_NULL_HANDLE;
+    }
+    if (m_accumImageMemory) {
+        m_devFuncs->vkFreeMemory(dev, m_accumImageMemory, nullptr);
+        m_accumImageMemory = VK_NULL_HANDLE;
+    }
+
     if (m_descriptorPool) {
         m_devFuncs->vkDestroyDescriptorPool(dev, m_descriptorPool, nullptr);
         m_descriptorPool = VK_NULL_HANDLE;
@@ -159,10 +173,17 @@ VkShaderModule RayRenderer::createShaderModule(const QString& path) {
 void RayRenderer::createStorageImage() {
     QSize sz = m_window->swapChainImageSize();
 
+    // Output image (8-bit for display)
     createImage(sz.width(), sz.height(), VK_FORMAT_R8G8B8A8_UNORM,
                 VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                 m_storageImage, m_storageImageMemory);
     m_storageImageView = createImageView(m_storageImage, VK_FORMAT_R8G8B8A8_UNORM);
+
+    // Accumulation buffer (32-bit float for precision during progressive rendering)
+    createImage(sz.width(), sz.height(), VK_FORMAT_R32G32B32A32_SFLOAT,
+                VK_IMAGE_USAGE_STORAGE_BIT,
+                m_accumImage, m_accumImageMemory);
+    m_accumImageView = createImageView(m_accumImage, VK_FORMAT_R32G32B32A32_SFLOAT);
 
     m_needsImageTransition = true;
 }
@@ -228,9 +249,9 @@ void RayRenderer::createPatchBuffers() {
 void RayRenderer::createDescriptorSet() {
     VkDevice dev = m_window->device();
 
-    // Create descriptor pool (1 image + 4 buffers)
+    // Create descriptor pool (2 images + 4 buffers)
     std::array<VkDescriptorPoolSize, 2> poolSizes{};
-    poolSizes[0] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1};
+    poolSizes[0] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2};  // output + accumulation
     poolSizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4};  // patches, BVH, indices, instances
 
     VkDescriptorPoolCreateInfo poolInfo{};
@@ -258,6 +279,10 @@ void RayRenderer::createDescriptorSet() {
     outputImageInfo.imageView = m_storageImageView;
     outputImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
+    VkDescriptorImageInfo accumImageInfo{};
+    accumImageInfo.imageView = m_accumImageView;
+    accumImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
     VkDescriptorBufferInfo patchBufferInfo{};
     patchBufferInfo.buffer = m_patchBuffer;
     patchBufferInfo.offset = 0;
@@ -278,7 +303,7 @@ void RayRenderer::createDescriptorSet() {
     instanceBufferInfo.offset = 0;
     instanceBufferInfo.range = VK_WHOLE_SIZE;
 
-    std::array<VkWriteDescriptorSet, 5> writes{};
+    std::array<VkWriteDescriptorSet, 6> writes{};
 
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[0].dstSet = m_descriptorSet;
@@ -315,14 +340,21 @@ void RayRenderer::createDescriptorSet() {
     writes[4].descriptorCount = 1;
     writes[4].pBufferInfo = &instanceBufferInfo;
 
+    writes[5].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[5].dstSet = m_descriptorSet;
+    writes[5].dstBinding = 5;
+    writes[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[5].descriptorCount = 1;
+    writes[5].pImageInfo = &accumImageInfo;
+
     m_devFuncs->vkUpdateDescriptorSets(dev, writes.size(), writes.data(), 0, nullptr);
 }
 
 void RayRenderer::createComputePipeline() {
     VkDevice dev = m_window->device();
 
-    // Descriptor set layout (5 bindings)
-    std::array<VkDescriptorSetLayoutBinding, 5> bindings{};
+    // Descriptor set layout (6 bindings: output image, 4 buffers, accum image)
+    std::array<VkDescriptorSetLayoutBinding, 6> bindings{};
 
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -348,6 +380,11 @@ void RayRenderer::createComputePipeline() {
     bindings[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[4].descriptorCount = 1;
     bindings[4].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    bindings[5].binding = 5;
+    bindings[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    bindings[5].descriptorCount = 1;
+    bindings[5].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -399,9 +436,15 @@ void RayRenderer::recordComputeCommands(VkCommandBuffer cmdBuf) {
     QSize sz = m_window->swapChainImageSize();
 
     if (m_needsImageTransition) {
+        // Output image transition
         transitionImageLayout(cmdBuf, m_storageImage,
             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
             0, VK_ACCESS_SHADER_WRITE_BIT,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        // Accumulation image transition
+        transitionImageLayout(cmdBuf, m_accumImage,
+            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+            0, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
             VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
         m_needsImageTransition = false;
     }

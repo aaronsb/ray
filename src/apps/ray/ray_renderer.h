@@ -92,6 +92,11 @@ private:
     VkDeviceMemory m_storageImageMemory = VK_NULL_HANDLE;
     VkImageView m_storageImageView = VK_NULL_HANDLE;
 
+    // Accumulation buffer (high precision for progressive rendering)
+    VkImage m_accumImage = VK_NULL_HANDLE;
+    VkDeviceMemory m_accumImageMemory = VK_NULL_HANDLE;
+    VkImageView m_accumImageView = VK_NULL_HANDLE;
+
     // Patch data buffer (16 vec4s per patch)
     VkBuffer m_patchBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_patchBufferMemory = VK_NULL_HANDLE;
