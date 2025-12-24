@@ -1,30 +1,37 @@
 // ============================================================================
-// sdf.glsl - Signed Distance Functions for CSG Ray Tracing
+// sdf.glsl - Signed Distance Functions for Soft/Volumetric Rendering
 // ============================================================================
 //
-// Convenience header that includes all SDF components.
-// Or include individual files for finer control.
+// BEST FOR:
+//   - Clouds, fog, atmospheric effects
+//   - Soft organic shapes with smooth blends
+//   - Procedural terrain, metaballs
+//   - Any shape where slight imprecision is acceptable
+//
+// NOT RECOMMENDED FOR:
+//   - Hard-edged CSG on solids (use csg/interval.glsl instead)
+//   - Sharp boolean cuts (sphere-minus-box, etc.)
+//   - Geometry requiring pixel-perfect edges
+//
+// WHY: SDF boolean operations (min/max) don't preserve true distances
+// at boundaries, causing sphere tracing to struggle at sharp edges.
 //
 // FILES:
 //   sdf/primitives.glsl  - SDF shapes (sphere, box, cylinder, etc.)
-//   sdf/csg.glsl         - Boolean operations (union, intersect, subtract)
+//   sdf/csg.glsl         - Soft boolean operations (smooth blends)
 //   sdf/transforms.glsl  - Transform operations (translate, rotate)
-//   sdf/intersect.glsl   - Ray-SDF intersection (Newton + sphere trace)
+//   sdf/intersect.glsl   - Ray-SDF intersection (sphere tracing)
 //
-// QUICK START:
+// EXAMPLE (soft blended shapes):
 //   #include "sdf.glsl"
 //
 //   float myScene(vec3 p) {
-//       float sphere = sdSphere(opTranslate(p, vec3(0,1,0)), 1.0);
-//       float box = sdBox(p, vec3(1.5, 0.5, 1.5));
-//       return opSubtract(box, sphere);  // Box with sphere cut out
+//       float a = sdSphere(opTranslate(p, vec3(-0.5, 0, 0)), 1.0);
+//       float b = sdSphere(opTranslate(p, vec3(0.5, 0, 0)), 1.0);
+//       return opSmoothUnion(a, b, 0.3);  // Smooth blend
 //   }
 //
 //   DEFINE_HIT_SDF(myScene)
-//
-//   // In main():
-//   float t; vec3 n;
-//   if (hitSDF_myScene(rayOrigin, rayDir, 0.001, 1000.0, t, n)) { ... }
 //
 // ============================================================================
 

@@ -5,6 +5,8 @@
 #include <QApplication>
 #include <QVulkanInstance>
 #include <QLoggingCategory>
+#include <QCommandLineParser>
+#include <QTimer>
 #include <cstdio>
 #include <vector>
 
@@ -37,6 +39,33 @@ std::vector<Patch> loadTeapotPatches() {
 
 int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
+    app.setApplicationName("ray");
+    app.setApplicationVersion("1.0");
+
+    // Parse command line arguments
+    QCommandLineParser parser;
+    parser.setApplicationDescription("Utah Teapot Bezier Patch Ray Tracer");
+    parser.addHelpOption();
+    parser.addVersionOption();
+
+    QCommandLineOption screenshotOption(
+        QStringList() << "screenshot",
+        "Take screenshot on start and exit. Optionally specify filename.",
+        "filename", "screenshot.png");
+    parser.addOption(screenshotOption);
+
+    QCommandLineOption framesOption(
+        QStringList() << "frames",
+        "Number of frames to accumulate before screenshot (default: 30).",
+        "count", "30");
+    parser.addOption(framesOption);
+
+    QCommandLineOption noExitOption(
+        QStringList() << "no-exit",
+        "Don't exit after taking screenshot (keep window open).");
+    parser.addOption(noExitOption);
+
+    parser.process(app);
 
     printf("=== Utah Teapot Bezier Patch Ray Tracer ===\n\n");
 
@@ -70,7 +99,7 @@ int main(int argc, char* argv[]) {
     }
 
     printf("\n=== Launching GPU ray tracer ===\n");
-    printf("Controls: Left-drag to orbit, scroll to zoom, Esc to quit\n\n");
+    printf("Controls: Left-drag to orbit, Right-drag to pan, scroll to zoom, S to save, Esc to quit\n\n");
 
     // Create window and renderer
     // BezierPatchGroup handles subdivision and BVH internally
@@ -79,6 +108,23 @@ int main(int argc, char* argv[]) {
     window.setPatches(std::move(patches));
     window.setTitle("Ray - Bezier Patch Ray Tracing");
     window.resize(800, 600);
+
+    // Handle screenshot on start
+    if (parser.isSet(screenshotOption)) {
+        QString filename = parser.value(screenshotOption);
+        uint32_t frames = parser.value(framesOption).toUInt();
+        bool exitAfter = !parser.isSet(noExitOption);
+
+        printf("Screenshot mode: %s after %u frames%s\n",
+               qPrintable(filename), frames,
+               exitAfter ? " (will exit)" : " (staying open)");
+
+        window.setScreenshotOnStart(filename, frames, exitAfter);
+
+        // Start checking after window is shown
+        QTimer::singleShot(100, &window, &RayWindow::checkScreenshotReady);
+    }
+
     window.show();
 
     return app.exec();

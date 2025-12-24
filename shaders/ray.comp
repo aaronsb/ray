@@ -17,7 +17,7 @@ layout(local_size_x = 16, local_size_y = 16) in;
 #define FEATURE_EMISSION        0   // Self-illuminating materials (TODO)
 #define FEATURE_ACCUMULATION    1   // Temporal accumulation (progressive refinement)
 #define FEATURE_JITTER          1   // Subpixel jitter for anti-aliasing
-#define FEATURE_CSG             0   // SDF-based CSG (disabled - use for volumetrics, not hard edges)
+#define FEATURE_CSG             1   // Interval-based CSG (analytic, exact edges)
 
 #ifndef MAX_BOUNCES
 #define MAX_BOUNCES             4   // Max ray depth (4-8 typical)
@@ -102,24 +102,24 @@ const float T_MAX = 1000.0;
 #define NEWTON_MAX_ITER 6  // Base iterations (used for first frames)
 #include "includes/bezier.glsl"
 
-// SDF-based CSG
+// Interval-based CSG (exact analytic edges)
 #if FEATURE_CSG
-#include "includes/sdf.glsl"
+#include "includes/csg.glsl"
 
-// Define a CSG test scene: sphere with box cut through it
-float csgScene(vec3 p) {
-    // Translate to position in world
-    vec3 local = opTranslate(p, vec3(-4.0, 1.0, 0.0));
+// CSG test scene: sphere with box cut through it
+bool hitCSG(vec3 ro, vec3 rd, float tMin, float tMax, out float hitT, out vec3 hitN) {
+    // Position in world
+    vec3 csgCenter = vec3(-4.0, 1.0, 0.0);
 
-    // Sphere with box cut through
-    float sphere = sdSphere(local, 1.5);
-    float box = sdBox(opRotateY(local, 0.5), vec3(0.7, 2.0, 0.7));
+    // Get intervals
+    Interval sphere = raySphere(ro, rd, csgCenter, 1.5);
+    Interval box = rayBox(ro, rd, csgCenter, vec3(0.7, 2.0, 0.7));
 
-    return opSubtract(sphere, box);
+    // Sphere minus box
+    Interval result = opSubtract(sphere, box);
+
+    return firstHit(result, tMin, tMax, hitT, hitN);
 }
-
-// Generate ray intersection function
-DEFINE_HIT_SDF(csgScene)
 #endif
 
 // ============================================================================
@@ -333,11 +333,11 @@ void main() {
         bool hitBezier = hitAllInstances(ray, EPSILON, T_MAX, t, normal, instanceId);
 
 #if FEATURE_CSG
-        // CSG object test
+        // CSG object test (interval-based, exact edges)
         float csgT;
         vec3 csgN;
         float tMaxCSG = hitBezier ? t : T_MAX;
-        if (hitSDF_csgScene(ray.origin, ray.direction, EPSILON, tMaxCSG, csgT, csgN)) {
+        if (hitCSG(ray.origin, ray.direction, EPSILON, tMaxCSG, csgT, csgN)) {
             t = csgT;
             normal = csgN;
             hitCSGFlag = true;
