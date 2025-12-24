@@ -1,6 +1,26 @@
 // Bicubic Bezier patch evaluation and ray intersection
 // Using Newton-Raphson iteration for direct ray-surface intersection
 
+// ============================================================================
+// TUNING PARAMETERS
+// ============================================================================
+#ifndef NEWTON_MAX_ITER
+#define NEWTON_MAX_ITER 10      // Max Newton iterations (6-12 typical)
+#endif
+
+#ifndef NEWTON_EPSILON
+#define NEWTON_EPSILON 1e-5     // Convergence threshold (1e-4 to 1e-6)
+#endif
+
+#ifndef NEWTON_DIVERGE_CHECK
+#define NEWTON_DIVERGE_CHECK 1        // Enable early exit on divergence (0 = disabled)
+#endif
+
+#ifndef NEWTON_DIVERGE_THRESHOLD
+#define NEWTON_DIVERGE_THRESHOLD 2.0  // Early exit if step > this
+#endif
+// ============================================================================
+
 // Bernstein basis polynomials for cubic (degree 3)
 float bernstein3(int i, float t) {
     float s = 1.0 - t;
@@ -113,10 +133,7 @@ bool tryNewtonKajiya(vec3 cp[16], vec3 ro, vec3 rd,
     float u = startU;
     float v = startV;
 
-    const int MAX_ITER = 10;
-    const float EPSILON = 1e-5;
-
-    for (int iter = 0; iter < MAX_ITER; iter++) {
+    for (int iter = 0; iter < NEWTON_MAX_ITER; iter++) {
         vec3 S = evalBezierPatch(cp, u, v);
         vec3 Su = evalBezierPatchDu(cp, u, v);
         vec3 Sv = evalBezierPatchDv(cp, u, v);
@@ -126,7 +143,7 @@ bool tryNewtonKajiya(vec3 cp[16], vec3 ro, vec3 rd,
         float f2 = dot(N2, S) + d2;
 
         // Check convergence
-        if (abs(f1) < EPSILON && abs(f2) < EPSILON) {
+        if (abs(f1) < NEWTON_EPSILON && abs(f2) < NEWTON_EPSILON) {
             // Verify (u,v) is in valid range
             if (u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0) {
                 return false;  // Converged outside patch
@@ -157,6 +174,13 @@ bool tryNewtonKajiya(vec3 cp[16], vec3 ro, vec3 rd,
         float invDet = 1.0 / det;
         float du = invDet * (j22 * f1 - j12 * f2);
         float dv = invDet * (-j21 * f1 + j11 * f2);
+
+#if NEWTON_DIVERGE_CHECK
+        // Early exit if clearly diverging (wrong patch)
+        if (abs(du) + abs(dv) > NEWTON_DIVERGE_THRESHOLD) {
+            return false;
+        }
+#endif
 
         u -= du;
         v -= dv;
