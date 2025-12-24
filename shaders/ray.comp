@@ -17,6 +17,7 @@ layout(local_size_x = 16, local_size_y = 16) in;
 #define FEATURE_EMISSION        0   // Self-illuminating materials (TODO)
 #define FEATURE_ACCUMULATION    1   // Temporal accumulation (progressive refinement)
 #define FEATURE_JITTER          1   // Subpixel jitter for anti-aliasing
+#define FEATURE_CSG             1   // SDF-based CSG objects
 
 #ifndef MAX_BOUNCES
 #define MAX_BOUNCES             4   // Max ray depth (4-8 typical)
@@ -100,6 +101,26 @@ const float T_MAX = 1000.0;
 // Newton iteration tuning
 #define NEWTON_MAX_ITER 6  // Base iterations (used for first frames)
 #include "includes/bezier.glsl"
+
+// SDF-based CSG
+#if FEATURE_CSG
+#include "includes/sdf.glsl"
+
+// Define a CSG test scene: sphere with box cut through it
+float csgScene(vec3 p) {
+    // Translate to position in world
+    vec3 local = opTranslate(p, vec3(-4.0, 1.0, 0.0));
+
+    // Sphere with box cut through
+    float sphere = sdSphere(local, 1.5);
+    float box = sdBox(opRotateY(local, 0.5), vec3(0.7, 2.0, 0.7));
+
+    return opSubtract(sphere, box);
+}
+
+// Generate ray intersection function
+DEFINE_HIT_SDF(csgScene)
+#endif
 
 // ============================================================================
 // ROTATION FUNCTIONS (for instance transforms)
@@ -306,21 +327,49 @@ void main() {
         vec3 normal;
         uint instanceId;
         bool hitFloorFlag = false;
+#if FEATURE_CSG
+        bool hitCSGFlag = false;
+#endif
 
         bool hitBezier = hitAllInstances(ray, EPSILON, T_MAX, t, normal, instanceId);
 
-#if FEATURE_FLOOR
-        float floorT;
-        vec3 floorN;
-        if (hitFloorPlane(ray.origin, ray.direction, -1.0, EPSILON, hitBezier ? t : T_MAX, floorT, floorN)) {
-            t = floorT;
-            normal = floorN;
-            hitFloorFlag = true;
+#if FEATURE_CSG
+        // CSG object test
+        float csgT;
+        vec3 csgN;
+        float tMaxCSG = hitBezier ? t : T_MAX;
+        if (hitSDF_csgScene(ray.origin, ray.direction, EPSILON, tMaxCSG, csgT, csgN)) {
+            t = csgT;
+            normal = csgN;
+            hitCSGFlag = true;
             hitBezier = false;
         }
 #endif
 
+#if FEATURE_FLOOR
+        float floorT;
+        vec3 floorN;
+#if FEATURE_CSG
+        float tMaxFloor = (hitBezier || hitCSGFlag) ? t : T_MAX;
+#else
+        float tMaxFloor = hitBezier ? t : T_MAX;
+#endif
+        if (hitFloorPlane(ray.origin, ray.direction, -1.0, EPSILON, tMaxFloor, floorT, floorN)) {
+            t = floorT;
+            normal = floorN;
+            hitFloorFlag = true;
+            hitBezier = false;
+#if FEATURE_CSG
+            hitCSGFlag = false;
+#endif
+        }
+#endif
+
+#if FEATURE_CSG
+        if (!hitBezier && !hitFloorFlag && !hitCSGFlag) {
+#else
         if (!hitBezier && !hitFloorFlag) {
+#endif
             color += throughput * skyGradient(ray.direction);
             break;
         }
@@ -346,6 +395,17 @@ void main() {
 #endif
             color += throughput * floorColor * (0.2 + 0.8 * NdotL * shadow);
             break;
+        }
+#endif
+
+#if FEATURE_CSG
+        // CSG object material (reflective red)
+        if (hitCSGFlag) {
+            vec3 csgColor = vec3(0.9, 0.2, 0.2);  // Red
+            ray.origin = hitPoint + normal * EPSILON * 2.0;
+            ray.direction = reflect(ray.direction, normal);
+            throughput *= csgColor;
+            continue;  // Bounce
         }
 #endif
 
