@@ -203,6 +203,20 @@ bool hitAllInstances(Ray worldRay, float tMin, float tMax,
     return hit;
 }
 
+// Fresnel reflectance (Schlick approximation)
+float fresnel(float cosTheta, float ior) {
+    float r0 = (1.0 - ior) / (1.0 + ior);
+    r0 = r0 * r0;
+    return r0 + (1.0 - r0) * pow(1.0 - cosTheta, 5.0);
+}
+
+// Sky/environment color
+vec3 skyColor(vec3 dir) {
+    float t = 0.5 * (dir.y + 1.0);
+    return mix(vec3(1.0), vec3(0.5, 0.7, 1.0), t);
+}
+
+// Material types: 0=diffuse, 1=metal, 2=glass
 void main() {
     ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
     if (pixel.x >= int(pc.width) || pixel.y >= int(pc.height)) return;
@@ -211,35 +225,87 @@ void main() {
     uv.y = 1.0 - uv.y;
 
     Ray ray = getCameraRay(uv);
+    vec3 color = vec3(0.0);
+    vec3 throughput = vec3(1.0);
 
-    vec3 color = vec3(0.1, 0.1, 0.15);  // Background
+    // Material properties per instance
+    // Instance 0: diffuse ceramic, 1: metal, 2: glass, 3: diffuse
+    uint materialTypes[4] = uint[](0, 1, 2, 0);
+    vec3 baseColors[4] = vec3[](
+        vec3(0.8, 0.6, 0.4),   // Ceramic
+        vec3(0.95, 0.93, 0.88), // Silver metal
+        vec3(1.0, 1.0, 1.0),   // Glass (white = clear)
+        vec3(0.8, 0.4, 0.6)    // Pink ceramic
+    );
 
-    float t;
-    vec3 normal;
-    uint instanceId;
+    const int MAX_BOUNCES = 4;
 
-    if (hitAllInstances(ray, EPSILON, T_MAX, t, normal, instanceId)) {
-        vec3 lightDir = normalize(vec3(1, 2, 1));
-        float NdotL = max(dot(normal, lightDir), 0.0);
+    for (int bounce = 0; bounce < MAX_BOUNCES; bounce++) {
+        float t;
+        vec3 normal;
+        uint instanceId;
 
-        // Vary color by instance
-        vec3 baseColors[4] = vec3[](
-            vec3(0.8, 0.6, 0.4),   // Ceramic
-            vec3(0.4, 0.6, 0.8),   // Blue ceramic
-            vec3(0.6, 0.8, 0.4),   // Green ceramic
-            vec3(0.8, 0.4, 0.6)    // Pink ceramic
-        );
+        if (!hitAllInstances(ray, EPSILON, T_MAX, t, normal, instanceId)) {
+            color += throughput * skyColor(ray.direction);
+            break;
+        }
+
+        vec3 hitPoint = ray.origin + t * ray.direction;
+        uint matType = materialTypes[instanceId % 4];
         vec3 baseColor = baseColors[instanceId % 4];
 
-        color = baseColor * (0.2 + 0.8 * NdotL);
+        if (matType == 0) {
+            // Diffuse - direct lighting only (no GI for speed)
+            vec3 lightDir = normalize(vec3(1, 2, 1));
+            float NdotL = max(dot(normal, lightDir), 0.0);
 
-        vec3 viewDir = -ray.direction;
-        vec3 halfVec = normalize(lightDir + viewDir);
-        float spec = pow(max(dot(normal, halfVec), 0.0), 64.0);
-        color += vec3(0.5) * spec;
+            // Shadow ray
+            float shadowT;
+            vec3 shadowN;
+            uint shadowId;
+            float shadow = hitAllInstances(Ray(hitPoint + normal * EPSILON * 2.0, lightDir),
+                                           EPSILON, T_MAX, shadowT, shadowN, shadowId) ? 0.3 : 1.0;
+
+            color += throughput * baseColor * (0.15 + 0.85 * NdotL * shadow);
+            break;  // No further bounces for diffuse
+
+        } else if (matType == 1) {
+            // Metal - perfect reflection
+            ray.origin = hitPoint + normal * EPSILON * 2.0;
+            ray.direction = reflect(ray.direction, normal);
+            throughput *= baseColor;
+
+        } else if (matType == 2) {
+            // Glass - refraction with Fresnel
+            float ior = 1.5;
+            float cosTheta = dot(-ray.direction, normal);
+            bool entering = cosTheta > 0.0;
+
+            vec3 n = entering ? normal : -normal;
+            float eta = entering ? (1.0 / ior) : ior;
+            cosTheta = abs(cosTheta);
+
+            float F = fresnel(cosTheta, ior);
+
+            // Simple: reflect if Fresnel says so, else refract
+            if (F > 0.5) {
+                ray.origin = hitPoint + n * EPSILON * 2.0;
+                ray.direction = reflect(ray.direction, n);
+            } else {
+                vec3 refracted = refract(ray.direction, n, eta);
+                if (length(refracted) < 0.5) {
+                    // Total internal reflection
+                    ray.origin = hitPoint + n * EPSILON * 2.0;
+                    ray.direction = reflect(ray.direction, n);
+                } else {
+                    ray.origin = hitPoint - n * EPSILON * 2.0;
+                    ray.direction = refracted;
+                }
+            }
+            throughput *= baseColor;
+        }
     }
 
     color = pow(clamp(color, 0.0, 1.0), vec3(1.0 / 2.2));
-
     imageStore(outputImage, pixel, vec4(color, 1.0));
 }
