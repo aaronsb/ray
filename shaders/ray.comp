@@ -287,9 +287,11 @@ void main() {
     // Initialize RNG - use frame index for temporal variation when accumulating
 #if FEATURE_ACCUMULATION
     initRNGTemporal(pixel, pc.frameIndex);
-    // Adaptive Newton iterations: more for first frames, fewer once accumulating
-    // First 4 frames get full iterations for solid base, then drop for speed
+    // Adaptive iterations: more for first frames, fewer once accumulating
     g_newtonMaxIter = (pc.frameIndex < 4) ? NEWTON_MAX_ITER : 4;
+#if FEATURE_CSG
+    g_sdfMaxIter = (pc.frameIndex < 4) ? 64 : 32;
+#endif
 #else
     initRNG(pixel);
 #endif

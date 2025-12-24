@@ -15,7 +15,7 @@
 // --- Tuning Parameters ---
 
 #ifndef SDF_MAX_ITER
-#define SDF_MAX_ITER 32
+#define SDF_MAX_ITER 64       // Safety cap (actual iterations usually fewer)
 #endif
 
 #ifndef SDF_EPSILON
@@ -25,6 +25,9 @@
 #ifndef SDF_GRADIENT_EPS
 #define SDF_GRADIENT_EPS 1e-4
 #endif
+
+// Runtime iteration limit (set by caller for adaptive control)
+int g_sdfMaxIter = SDF_MAX_ITER;
 
 // --- Numerical Gradient ---
 // Computes surface normal from SDF
@@ -47,7 +50,7 @@ bool hitSDF_##sceneSDF(vec3 ro, vec3 rd, float tMin, float tMax, \
                        out float hitT, out vec3 hitN) { \
     float t = tMin; \
     \
-    for (int i = 0; i < SDF_MAX_ITER; i++) { \
+    for (int i = 0; i < g_sdfMaxIter; i++) { \
         vec3 p = ro + t * rd; \
         float d = sceneSDF(p); \
         \
