@@ -9,9 +9,9 @@ layout(push_constant) uniform PushConstants {
     uint width;
     uint height;
     uint numPatches;
-    uint frameIndex;
+    uint numBVHNodes;
     vec3 camPos;
-    float _pad1;
+    uint frameIndex;
     vec3 camTarget;
     float _pad2;
 } pc;
@@ -21,16 +21,28 @@ layout(std430, set = 0, binding = 1) readonly buffer PatchBuffer {
     vec4 patchData[];  // patchData[patchIndex * 16 + pointIndex]
 };
 
-// Pre-computed AABBs for early rejection (2 vec4s per patch: min, max)
-layout(std430, set = 0, binding = 2) readonly buffer AABBBuffer {
-    vec4 aabbData[];  // aabbData[patchIndex * 2 + 0] = min, [1] = max
+// BVH nodes (64 bytes each, matching CPU struct)
+struct BVHNode {
+    float minX, minY, minZ;
+    uint leftOrFirst;   // Left child index, or first patch index if leaf
+    float maxX, maxY, maxZ;
+    uint rightOrCount;  // Right child index, or patch count if leaf (high bit = leaf flag)
+};
+
+layout(std430, set = 0, binding = 2) readonly buffer BVHBuffer {
+    BVHNode bvhNodes[];
+};
+
+// Patch indices (reordered by BVH build)
+layout(std430, set = 0, binding = 3) readonly buffer PatchIndexBuffer {
+    uint patchIndices[];
 };
 
 const float PI = 3.14159265359;
 const float EPSILON = 0.0001;
 const float T_MAX = 1000.0;
 
-#include "bezier.glsl"
+#include "includes/bezier.glsl"
 
 // Simple camera
 struct Ray {
@@ -51,38 +63,68 @@ Ray getCameraRay(vec2 uv) {
     return Ray(pc.camPos, dir);
 }
 
-// Check all patches for intersection
-// Uses pre-computed AABBs for efficient early rejection
+// BVH node helpers
+bool isLeaf(uint nodeIdx) {
+    return (bvhNodes[nodeIdx].rightOrCount & 0x80000000u) != 0u;
+}
+
+uint patchCount(uint nodeIdx) {
+    return bvhNodes[nodeIdx].rightOrCount & 0x7FFFFFFFu;
+}
+
+// Check all patches for intersection using BVH acceleration
 bool hitTeapot(Ray r, float tMin, float tMax,
                out float hitT, out vec3 hitN, out float hitU, out float hitV, out uint hitPatch) {
     bool hit = false;
     float closestT = tMax;
 
-    for (uint p = 0; p < pc.numPatches; p++) {
-        // Early rejection with pre-computed AABB
-        vec3 aabbMin = aabbData[p * 2 + 0].xyz;
-        vec3 aabbMax = aabbData[p * 2 + 1].xyz;
+    // Stack-based BVH traversal
+    uint stack[32];
+    int stackPtr = 0;
+    stack[stackPtr++] = 0;  // Start at root
+
+    while (stackPtr > 0) {
+        uint nodeIdx = stack[--stackPtr];
+        BVHNode node = bvhNodes[nodeIdx];
+
+        // Test ray against node AABB
+        vec3 aabbMin = vec3(node.minX, node.minY, node.minZ);
+        vec3 aabbMax = vec3(node.maxX, node.maxY, node.maxZ);
 
         if (!hitAABB(aabbMin, aabbMax, r.origin, r.direction, tMin, closestT)) {
             continue;
         }
 
-        // Load control points for this patch
-        vec3 cp[16];
-        for (int i = 0; i < 16; i++) {
-            cp[i] = patchData[p * 16 + i].xyz;
-        }
+        if (isLeaf(nodeIdx)) {
+            // Test all patches in this leaf
+            uint first = node.leftOrFirst;
+            uint count = patchCount(nodeIdx);
 
-        float t, u, v;
-        vec3 n;
-        if (hitBezierPatch(cp, r.origin, r.direction, tMin, closestT, t, u, v, n)) {
-            hit = true;
-            closestT = t;
-            hitT = t;
-            hitN = n;
-            hitU = u;
-            hitV = v;
-            hitPatch = p;
+            for (uint i = 0; i < count; i++) {
+                uint patchIdx = patchIndices[first + i];
+
+                // Load control points for this patch
+                vec3 cp[16];
+                for (int j = 0; j < 16; j++) {
+                    cp[j] = patchData[patchIdx * 16 + j].xyz;
+                }
+
+                float t, u, v;
+                vec3 n;
+                if (hitBezierPatch(cp, r.origin, r.direction, tMin, closestT, t, u, v, n)) {
+                    hit = true;
+                    closestT = t;
+                    hitT = t;
+                    hitN = n;
+                    hitU = u;
+                    hitV = v;
+                    hitPatch = patchIdx;
+                }
+            }
+        } else {
+            // Push children onto stack (push right first so left is processed first)
+            stack[stackPtr++] = node.rightOrCount;
+            stack[stackPtr++] = node.leftOrFirst;
         }
     }
 

@@ -7,15 +7,16 @@
 #include <QElapsedTimer>
 #include <vector>
 #include "bezier_subdiv.h"
+#include "bvh.h"
 
 // Push constants matching teapot.comp
 struct TeapotPushConstants {
     uint32_t width;
     uint32_t height;
     uint32_t numPatches;
-    uint32_t frameIndex;
+    uint32_t numBVHNodes;
     float camPosX, camPosY, camPosZ;
-    float _pad1;
+    uint32_t frameIndex;
     float camTargetX, camTargetY, camTargetZ;
     float _pad2;
 };
@@ -60,6 +61,7 @@ public:
     void startNextFrame() override;
 
     TeapotCamera& camera() { return m_camera; }
+    float fps() const { return m_fps; }
     void markCameraMotion() {
         m_frameIndex = 0;
         m_window->requestUpdate();
@@ -71,6 +73,7 @@ private:
 
     // Patch data (from CPU subdivision)
     std::vector<bezier::SubPatch> m_patches;
+    bvh::BVH m_bvh;
     TeapotCamera m_camera;
 
     // Vulkan resources
@@ -89,13 +92,20 @@ private:
     VkBuffer m_patchBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_patchBufferMemory = VK_NULL_HANDLE;
 
-    // AABB buffer (2 vec4s per patch: min, max)
-    VkBuffer m_aabbBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory m_aabbBufferMemory = VK_NULL_HANDLE;
+    // BVH node buffer
+    VkBuffer m_bvhBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_bvhBufferMemory = VK_NULL_HANDLE;
+
+    // Patch index buffer (reordered by BVH)
+    VkBuffer m_patchIndexBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_patchIndexBufferMemory = VK_NULL_HANDLE;
 
     // Frame tracking
     uint32_t m_frameIndex = 0;
     bool m_needsImageTransition = true;
+    QElapsedTimer m_frameTimer;
+    float m_fps = 0.0f;
+    qint64 m_lastFrameTime = 0;
 
     // Helpers
     VkShaderModule createShaderModule(const QString& path);

@@ -16,6 +16,10 @@ TeapotRenderer::TeapotRenderer(QVulkanWindow* window,
 
 void TeapotRenderer::initResources() {
     m_devFuncs = m_window->vulkanInstance()->deviceFunctions(m_window->device());
+    m_frameTimer.start();
+
+    // Build BVH over patches
+    m_bvh.build(m_patches);
 
     createPatchBuffers();
     createComputePipeline();
@@ -74,19 +78,37 @@ void TeapotRenderer::releaseResources() {
         m_devFuncs->vkFreeMemory(dev, m_patchBufferMemory, nullptr);
         m_patchBufferMemory = VK_NULL_HANDLE;
     }
-    if (m_aabbBuffer) {
-        m_devFuncs->vkDestroyBuffer(dev, m_aabbBuffer, nullptr);
-        m_aabbBuffer = VK_NULL_HANDLE;
+    if (m_bvhBuffer) {
+        m_devFuncs->vkDestroyBuffer(dev, m_bvhBuffer, nullptr);
+        m_bvhBuffer = VK_NULL_HANDLE;
     }
-    if (m_aabbBufferMemory) {
-        m_devFuncs->vkFreeMemory(dev, m_aabbBufferMemory, nullptr);
-        m_aabbBufferMemory = VK_NULL_HANDLE;
+    if (m_bvhBufferMemory) {
+        m_devFuncs->vkFreeMemory(dev, m_bvhBufferMemory, nullptr);
+        m_bvhBufferMemory = VK_NULL_HANDLE;
+    }
+    if (m_patchIndexBuffer) {
+        m_devFuncs->vkDestroyBuffer(dev, m_patchIndexBuffer, nullptr);
+        m_patchIndexBuffer = VK_NULL_HANDLE;
+    }
+    if (m_patchIndexBufferMemory) {
+        m_devFuncs->vkFreeMemory(dev, m_patchIndexBufferMemory, nullptr);
+        m_patchIndexBufferMemory = VK_NULL_HANDLE;
     }
 }
 
 void TeapotRenderer::startNextFrame() {
-    VkCommandBuffer cmdBuf = m_window->currentCommandBuffer();
+    // Calculate FPS
+    qint64 now = m_frameTimer.nsecsElapsed();
+    if (m_lastFrameTime > 0) {
+        float frameMs = (now - m_lastFrameTime) / 1000000.0f;
+        m_fps = m_fps * 0.9f + (1000.0f / frameMs) * 0.1f;  // Smoothed
+    }
+    m_lastFrameTime = now;
 
+    // Update window title with FPS
+    m_window->setTitle(QString("Utah Teapot - %1 fps").arg(static_cast<int>(m_fps)));
+
+    VkCommandBuffer cmdBuf = m_window->currentCommandBuffer();
     recordComputeCommands(cmdBuf);
 
     m_frameIndex++;
@@ -126,24 +148,28 @@ void TeapotRenderer::createStorageImage() {
 }
 
 void TeapotRenderer::createPatchBuffers() {
-    // Pack patch control points into vec4s (16 vec4s per patch, w unused)
-    // Each patch has 16 control points, each control point is xyz
+    VkDevice dev = m_window->device();
     size_t numPatches = m_patches.size();
-    size_t patchDataSize = numPatches * 16 * sizeof(float) * 4;  // 16 vec4s per patch
-    size_t aabbDataSize = numPatches * 2 * sizeof(float) * 4;    // 2 vec4s per patch (min, max)
 
+    // Patch data: 16 vec4s per patch (control points)
+    size_t patchDataSize = numPatches * 16 * sizeof(float) * 4;
     createBuffer(patchDataSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                  m_patchBuffer, m_patchBufferMemory);
 
-    createBuffer(aabbDataSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+    // BVH nodes
+    size_t bvhSize = m_bvh.nodes.size() * sizeof(bvh::BVHNode);
+    createBuffer(bvhSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                 m_aabbBuffer, m_aabbBufferMemory);
+                 m_bvhBuffer, m_bvhBufferMemory);
 
-    // Upload patch data
-    VkDevice dev = m_window->device();
+    // Patch indices (reordered by BVH)
+    size_t indexSize = m_bvh.patchIndices.size() * sizeof(uint32_t);
+    createBuffer(indexSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 m_patchIndexBuffer, m_patchIndexBufferMemory);
 
-    // Pack control points as vec4s (w = 0)
+    // Upload patch control points as vec4s
     std::vector<float> patchData(numPatches * 16 * 4);
     for (size_t p = 0; p < numPatches; p++) {
         for (int i = 0; i < 16; i++) {
@@ -151,7 +177,7 @@ void TeapotRenderer::createPatchBuffers() {
             patchData[idx + 0] = m_patches[p].cp[i].x;
             patchData[idx + 1] = m_patches[p].cp[i].y;
             patchData[idx + 2] = m_patches[p].cp[i].z;
-            patchData[idx + 3] = 0.0f;  // padding
+            patchData[idx + 3] = 0.0f;
         }
     }
 
@@ -160,35 +186,28 @@ void TeapotRenderer::createPatchBuffers() {
     memcpy(data, patchData.data(), patchDataSize);
     m_devFuncs->vkUnmapMemory(dev, m_patchBufferMemory);
 
-    // Pack AABBs as vec4s (w = 0)
-    std::vector<float> aabbData(numPatches * 2 * 4);
-    for (size_t p = 0; p < numPatches; p++) {
-        size_t idx = p * 2 * 4;
-        aabbData[idx + 0] = m_patches[p].bounds.min.x;
-        aabbData[idx + 1] = m_patches[p].bounds.min.y;
-        aabbData[idx + 2] = m_patches[p].bounds.min.z;
-        aabbData[idx + 3] = 0.0f;
-        aabbData[idx + 4] = m_patches[p].bounds.max.x;
-        aabbData[idx + 5] = m_patches[p].bounds.max.y;
-        aabbData[idx + 6] = m_patches[p].bounds.max.z;
-        aabbData[idx + 7] = 0.0f;
-    }
+    // Upload BVH nodes
+    m_devFuncs->vkMapMemory(dev, m_bvhBufferMemory, 0, bvhSize, 0, &data);
+    memcpy(data, m_bvh.nodes.data(), bvhSize);
+    m_devFuncs->vkUnmapMemory(dev, m_bvhBufferMemory);
 
-    m_devFuncs->vkMapMemory(dev, m_aabbBufferMemory, 0, aabbDataSize, 0, &data);
-    memcpy(data, aabbData.data(), aabbDataSize);
-    m_devFuncs->vkUnmapMemory(dev, m_aabbBufferMemory);
+    // Upload patch indices
+    m_devFuncs->vkMapMemory(dev, m_patchIndexBufferMemory, 0, indexSize, 0, &data);
+    memcpy(data, m_bvh.patchIndices.data(), indexSize);
+    m_devFuncs->vkUnmapMemory(dev, m_patchIndexBufferMemory);
 
-    printf("Uploaded %zu patches to GPU (%.1f KB patches + %.1f KB AABBs)\n",
-           numPatches, patchDataSize / 1024.0f, aabbDataSize / 1024.0f);
+    printf("Uploaded %zu patches + %zu BVH nodes (%.1f KB total)\n",
+           numPatches, m_bvh.nodes.size(),
+           (patchDataSize + bvhSize + indexSize) / 1024.0f);
 }
 
 void TeapotRenderer::createDescriptorSet() {
     VkDevice dev = m_window->device();
 
-    // Create descriptor pool
+    // Create descriptor pool (1 image + 3 buffers)
     std::array<VkDescriptorPoolSize, 2> poolSizes{};
     poolSizes[0] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1};
-    poolSizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2};  // patches + AABBs
+    poolSizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3};  // patches, BVH, indices
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -200,7 +219,6 @@ void TeapotRenderer::createDescriptorSet() {
         qFatal("Failed to create descriptor pool");
     }
 
-    // Allocate descriptor set
     VkDescriptorSetAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     allocInfo.descriptorPool = m_descriptorPool;
@@ -211,7 +229,7 @@ void TeapotRenderer::createDescriptorSet() {
         qFatal("Failed to allocate descriptor set");
     }
 
-    // Update descriptor set
+    // Descriptor infos
     VkDescriptorImageInfo outputImageInfo{};
     outputImageInfo.imageView = m_storageImageView;
     outputImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -221,14 +239,18 @@ void TeapotRenderer::createDescriptorSet() {
     patchBufferInfo.offset = 0;
     patchBufferInfo.range = VK_WHOLE_SIZE;
 
-    VkDescriptorBufferInfo aabbBufferInfo{};
-    aabbBufferInfo.buffer = m_aabbBuffer;
-    aabbBufferInfo.offset = 0;
-    aabbBufferInfo.range = VK_WHOLE_SIZE;
+    VkDescriptorBufferInfo bvhBufferInfo{};
+    bvhBufferInfo.buffer = m_bvhBuffer;
+    bvhBufferInfo.offset = 0;
+    bvhBufferInfo.range = VK_WHOLE_SIZE;
 
-    std::array<VkWriteDescriptorSet, 3> writes{};
+    VkDescriptorBufferInfo indexBufferInfo{};
+    indexBufferInfo.buffer = m_patchIndexBuffer;
+    indexBufferInfo.offset = 0;
+    indexBufferInfo.range = VK_WHOLE_SIZE;
 
-    // Binding 0: output image
+    std::array<VkWriteDescriptorSet, 4> writes{};
+
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[0].dstSet = m_descriptorSet;
     writes[0].dstBinding = 0;
@@ -236,7 +258,6 @@ void TeapotRenderer::createDescriptorSet() {
     writes[0].descriptorCount = 1;
     writes[0].pImageInfo = &outputImageInfo;
 
-    // Binding 1: patch buffer
     writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[1].dstSet = m_descriptorSet;
     writes[1].dstBinding = 1;
@@ -244,13 +265,19 @@ void TeapotRenderer::createDescriptorSet() {
     writes[1].descriptorCount = 1;
     writes[1].pBufferInfo = &patchBufferInfo;
 
-    // Binding 2: AABB buffer
     writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[2].dstSet = m_descriptorSet;
     writes[2].dstBinding = 2;
     writes[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     writes[2].descriptorCount = 1;
-    writes[2].pBufferInfo = &aabbBufferInfo;
+    writes[2].pBufferInfo = &bvhBufferInfo;
+
+    writes[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[3].dstSet = m_descriptorSet;
+    writes[3].dstBinding = 3;
+    writes[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[3].descriptorCount = 1;
+    writes[3].pBufferInfo = &indexBufferInfo;
 
     m_devFuncs->vkUpdateDescriptorSets(dev, writes.size(), writes.data(), 0, nullptr);
 }
@@ -258,26 +285,28 @@ void TeapotRenderer::createDescriptorSet() {
 void TeapotRenderer::createComputePipeline() {
     VkDevice dev = m_window->device();
 
-    // Create descriptor set layout (3 bindings)
-    std::array<VkDescriptorSetLayoutBinding, 3> bindings{};
+    // Descriptor set layout (4 bindings)
+    std::array<VkDescriptorSetLayoutBinding, 4> bindings{};
 
-    // Binding 0: output image
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     bindings[0].descriptorCount = 1;
     bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
-    // Binding 1: patch buffer
     bindings[1].binding = 1;
     bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[1].descriptorCount = 1;
     bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
-    // Binding 2: AABB buffer
     bindings[2].binding = 2;
     bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[2].descriptorCount = 1;
     bindings[2].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    bindings[3].binding = 3;
+    bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[3].descriptorCount = 1;
+    bindings[3].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -288,13 +317,11 @@ void TeapotRenderer::createComputePipeline() {
         qFatal("Failed to create descriptor set layout");
     }
 
-    // Push constant range
     VkPushConstantRange pushConstantRange{};
     pushConstantRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     pushConstantRange.offset = 0;
     pushConstantRange.size = sizeof(TeapotPushConstants);
 
-    // Pipeline layout
     VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
     pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pipelineLayoutInfo.setLayoutCount = 1;
@@ -306,7 +333,6 @@ void TeapotRenderer::createComputePipeline() {
         qFatal("Failed to create pipeline layout");
     }
 
-    // Load teapot shader
     QString shaderPath = QCoreApplication::applicationDirPath() + "/shaders/teapot.spv";
     VkShaderModule shaderModule = createShaderModule(shaderPath);
 
@@ -331,26 +357,23 @@ void TeapotRenderer::createComputePipeline() {
 void TeapotRenderer::recordComputeCommands(VkCommandBuffer cmdBuf) {
     QSize sz = m_window->swapChainImageSize();
 
-    // Transition image to general layout on first use
     if (m_needsImageTransition) {
         transitionImageLayout(cmdBuf, m_storageImage,
             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
             0, VK_ACCESS_SHADER_WRITE_BIT,
             VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-
         m_needsImageTransition = false;
     }
 
-    // Bind pipeline and descriptors
     m_devFuncs->vkCmdBindPipeline(cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, m_computePipeline);
     m_devFuncs->vkCmdBindDescriptorSets(cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE,
         m_pipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
 
-    // Push constants
     TeapotPushConstants pc{};
     pc.width = sz.width();
     pc.height = sz.height();
     pc.numPatches = static_cast<uint32_t>(m_patches.size());
+    pc.numBVHNodes = static_cast<uint32_t>(m_bvh.nodes.size());
     pc.frameIndex = m_frameIndex;
 
     m_camera.getPosition(pc.camPosX, pc.camPosY, pc.camPosZ);
@@ -361,12 +384,11 @@ void TeapotRenderer::recordComputeCommands(VkCommandBuffer cmdBuf) {
     m_devFuncs->vkCmdPushConstants(cmdBuf, m_pipelineLayout,
         VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(TeapotPushConstants), &pc);
 
-    // Dispatch compute shader (16x16 workgroups)
     uint32_t groupCountX = (sz.width() + 15) / 16;
     uint32_t groupCountY = (sz.height() + 15) / 16;
     m_devFuncs->vkCmdDispatch(cmdBuf, groupCountX, groupCountY, 1);
 
-    // Barrier: compute write -> transfer read
+    // Barriers and blit to swapchain
     VkImageMemoryBarrier barrier{};
     barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
@@ -382,7 +404,6 @@ void TeapotRenderer::recordComputeCommands(VkCommandBuffer cmdBuf) {
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
         0, 0, nullptr, 0, nullptr, 1, &barrier);
 
-    // Transition swapchain image to transfer dst
     VkImage swapchainImage = m_window->swapChainImage(m_window->currentSwapChainImageIndex());
 
     VkImageMemoryBarrier swapBarrier{};
@@ -400,7 +421,6 @@ void TeapotRenderer::recordComputeCommands(VkCommandBuffer cmdBuf) {
         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
         0, 0, nullptr, 0, nullptr, 1, &swapBarrier);
 
-    // Blit storage image to swapchain
     VkImageBlit blit{};
     blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     blit.srcSubresource.layerCount = 1;
@@ -414,7 +434,6 @@ void TeapotRenderer::recordComputeCommands(VkCommandBuffer cmdBuf) {
         swapchainImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         1, &blit, VK_FILTER_NEAREST);
 
-    // Transition swapchain to present
     swapBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     swapBarrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
     swapBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -424,7 +443,6 @@ void TeapotRenderer::recordComputeCommands(VkCommandBuffer cmdBuf) {
         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
         0, 0, nullptr, 0, nullptr, 1, &swapBarrier);
 
-    // Transition storage image back to general for next frame
     barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
     barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
     barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
