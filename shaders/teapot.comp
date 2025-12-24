@@ -1,0 +1,114 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(rgba8, set = 0, binding = 0) uniform writeonly image2D outputImage;
+
+// Push constants
+layout(push_constant) uniform PushConstants {
+    uint width;
+    uint height;
+    uint numPatches;
+    uint frameIndex;
+    vec3 camPos;
+    float _pad1;
+    vec3 camTarget;
+    float _pad2;
+} pc;
+
+// Patch control points: 16 vec4s per patch (w unused, for alignment)
+layout(std430, set = 0, binding = 1) readonly buffer PatchBuffer {
+    vec4 patches[];  // patches[patchIndex * 16 + pointIndex]
+};
+
+const float PI = 3.14159265359;
+const float EPSILON = 0.0001;
+const float T_MAX = 1000.0;
+
+#include "bezier.glsl"
+
+// Simple camera
+struct Ray {
+    vec3 origin;
+    vec3 direction;
+};
+
+Ray getCameraRay(vec2 uv) {
+    // Simple perspective camera
+    vec3 forward = normalize(pc.camTarget - pc.camPos);
+    vec3 right = normalize(cross(forward, vec3(0, 1, 0)));
+    vec3 up = cross(right, forward);
+
+    float fov = 0.8;  // ~45 degrees
+    vec3 dir = normalize(forward + (uv.x - 0.5) * fov * right + (uv.y - 0.5) * fov * up);
+
+    return Ray(pc.camPos, dir);
+}
+
+// Check all patches for intersection
+bool hitTeapot(Ray r, float tMin, float tMax,
+               out float hitT, out vec3 hitN, out float hitU, out float hitV, out uint hitPatch) {
+    bool hit = false;
+    float closestT = tMax;
+
+    for (uint p = 0; p < pc.numPatches; p++) {
+        // Load control points for this patch
+        vec3 cp[16];
+        for (int i = 0; i < 16; i++) {
+            cp[i] = patches[p * 16 + i].xyz;
+        }
+
+        float t, u, v;
+        vec3 n;
+        if (hitBezierPatch(cp, r.origin, r.direction, tMin, closestT, t, u, v, n)) {
+            hit = true;
+            closestT = t;
+            hitT = t;
+            hitN = n;
+            hitU = u;
+            hitV = v;
+            hitPatch = p;
+        }
+    }
+
+    return hit;
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= int(pc.width) || pixel.y >= int(pc.height)) return;
+
+    vec2 uv = vec2(pixel) / vec2(pc.width, pc.height);
+    uv.y = 1.0 - uv.y;  // Flip Y
+
+    Ray ray = getCameraRay(uv);
+
+    vec3 color = vec3(0.1, 0.1, 0.15);  // Background
+
+    float t, u, v;
+    vec3 normal;
+    uint patchId;
+
+    if (hitTeapot(ray, EPSILON, T_MAX, t, normal, u, v, patchId)) {
+        // Simple shading
+        vec3 lightDir = normalize(vec3(1, 2, 1));
+        float NdotL = max(dot(normal, lightDir), 0.0);
+
+        // Base color varies by patch for visualization
+        vec3 baseColor = vec3(0.8, 0.6, 0.4);  // Ceramic-ish
+
+        // Ambient + diffuse
+        color = baseColor * (0.2 + 0.8 * NdotL);
+
+        // Specular highlight
+        vec3 viewDir = -ray.direction;
+        vec3 halfVec = normalize(lightDir + viewDir);
+        float spec = pow(max(dot(normal, halfVec), 0.0), 64.0);
+        color += vec3(0.5) * spec;
+    }
+
+    // Gamma correction
+    color = pow(clamp(color, 0.0, 1.0), vec3(1.0 / 2.2));
+
+    imageStore(outputImage, pixel, vec4(color, 1.0));
+}
