@@ -19,6 +19,9 @@
 #ifndef NEWTON_DIVERGE_THRESHOLD
 #define NEWTON_DIVERGE_THRESHOLD 2.0  // Early exit if step > this
 #endif
+
+// Runtime override (set before calling hitBezierPatch if adaptive iterations needed)
+int g_newtonMaxIter = NEWTON_MAX_ITER;
 // ============================================================================
 
 // Bernstein basis polynomials for cubic (degree 3)
@@ -133,7 +136,7 @@ bool tryNewtonKajiya(vec3 cp[16], vec3 ro, vec3 rd,
     float u = startU;
     float v = startV;
 
-    for (int iter = 0; iter < NEWTON_MAX_ITER; iter++) {
+    for (int iter = 0; iter < g_newtonMaxIter; iter++) {
         vec3 S = evalBezierPatch(cp, u, v);
         vec3 Su = evalBezierPatchDu(cp, u, v);
         vec3 Sv = evalBezierPatchDv(cp, u, v);

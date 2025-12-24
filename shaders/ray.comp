@@ -94,6 +94,9 @@ const float T_MAX = 1000.0;
 #endif
 
 #include "includes/geometry.glsl"
+
+// Newton iteration tuning
+#define NEWTON_MAX_ITER 6  // Base iterations (used for first frames)
 #include "includes/bezier.glsl"
 
 // ============================================================================
@@ -261,6 +264,9 @@ void main() {
     // Initialize RNG - use frame index for temporal variation when accumulating
 #if FEATURE_ACCUMULATION
     initRNGTemporal(pixel, pc.frameIndex);
+    // Adaptive Newton iterations: more for first frames, fewer once accumulating
+    // First 4 frames get full iterations for solid base, then drop for speed
+    g_newtonMaxIter = (pc.frameIndex < 4) ? NEWTON_MAX_ITER : 4;
 #else
     initRNG(pixel);
 #endif
