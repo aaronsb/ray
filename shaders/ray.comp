@@ -18,7 +18,9 @@ layout(local_size_x = 16, local_size_y = 16) in;
 #define FEATURE_ACCUMULATION    1   // Temporal accumulation (progressive refinement)
 #define FEATURE_JITTER          1   // Subpixel jitter for anti-aliasing
 
-#define MAX_BOUNCES             4   // Max ray depth
+#ifndef MAX_BOUNCES
+#define MAX_BOUNCES             4   // Max ray depth (4-8 typical)
+#endif
 // ============================================================================
 
 layout(rgba8, set = 0, binding = 0) uniform image2D outputImage;  // readwrite for accumulation
