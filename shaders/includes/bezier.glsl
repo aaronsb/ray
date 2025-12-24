@@ -89,23 +89,24 @@ bool hitAABB(vec3 bmin, vec3 bmax, vec3 ro, vec3 rd, float tMin, float tMax) {
 }
 
 // Ray-Bezier patch intersection using Newton-Raphson
-// Returns true if hit found, sets t, u, v, normal
+// Optimized for pre-subdivided small patches where center guess works
 bool hitBezierPatch(vec3 cp[16], vec3 ro, vec3 rd, float tMin, float tMax,
                     out float hitT, out float hitU, out float hitV, out vec3 hitN) {
-    // Early rejection with AABB
-    vec3 bmin, bmax;
-    patchAABB(cp, bmin, bmax);
-    if (!hitAABB(bmin, bmax, ro, rd, tMin, tMax)) {
-        return false;
-    }
-
-    // Initial guess: center of parameter space, AABB midpoint for t
+    // Initial guess: center of parameter space
     float u = 0.5;
     float v = 0.5;
-    float t = 0.5 * (tMin + tMax);
 
-    const int MAX_ITER = 20;
-    const float EPSILON = 1e-6;
+    // Estimate initial t from patch center
+    vec3 centerPt = evalBezierPatch(cp, 0.5, 0.5);
+    vec3 toCenter = centerPt - ro;
+    float t = dot(toCenter, rd) / dot(rd, rd);
+
+    // Clamp initial t to valid range
+    t = clamp(t, tMin, tMax);
+
+    // For pre-subdivided patches, 8 iterations is plenty
+    const int MAX_ITER = 8;
+    const float EPSILON = 1e-5;
 
     for (int iter = 0; iter < MAX_ITER; iter++) {
         // Evaluate surface and derivatives
@@ -117,8 +118,9 @@ bool hitBezierPatch(vec3 cp[16], vec3 ro, vec3 rd, float tMin, float tMax,
         vec3 F = S - (ro + t * rd);
 
         // Check convergence
-        if (dot(F, F) < EPSILON * EPSILON) {
-            // Verify u, v in [0, 1] and t in valid range
+        float err = dot(F, F);
+        if (err < EPSILON * EPSILON) {
+            // Verify parameters in valid range
             if (u >= 0.0 && u <= 1.0 && v >= 0.0 && v <= 1.0 && t >= tMin && t <= tMax) {
                 hitT = t;
                 hitU = u;
@@ -130,91 +132,55 @@ bool hitBezierPatch(vec3 cp[16], vec3 ro, vec3 rd, float tMin, float tMax,
         }
 
         // Jacobian: [Su | Sv | -rd]
-        // We need to solve J * delta = -F
-        // Using Cramer's rule for 3x3 system
-
-        // Column vectors of Jacobian
+        // Solve J * delta = -F using Cramer's rule
         vec3 c0 = Su;
         vec3 c1 = Sv;
         vec3 c2 = -rd;
 
-        // Determinant
         float det = dot(c0, cross(c1, c2));
         if (abs(det) < 1e-10) {
-            // Singular Jacobian, try different initial guess
-            break;
+            return false;  // Singular - ray parallel to surface
         }
 
         float invDet = 1.0 / det;
-
-        // Cramer's rule: delta_u = det([F | c1 | c2]) / det
         float du = dot(-F, cross(c1, c2)) * invDet;
         float dv = dot(c0, cross(-F, c2)) * invDet;
         float dt = dot(c0, cross(c1, -F)) * invDet;
 
-        // Update
+        // Update with damping for stability
         u += du;
         v += dv;
         t += dt;
 
-        // Clamp to reasonable range to aid convergence
-        u = clamp(u, -0.1, 1.1);
-        v = clamp(v, -0.1, 1.1);
+        // Early exit if parameters diverge (no intersection)
+        if (u < -0.5 || u > 1.5 || v < -0.5 || v > 1.5) {
+            return false;
+        }
     }
 
-    // Try multiple initial guesses for robustness
-    // Grid of starting points in (u, v) parameter space
-    for (int iu = 0; iu < 3; iu++) {
-        for (int iv = 0; iv < 3; iv++) {
-            u = 0.25 + 0.25 * float(iu);
-            v = 0.25 + 0.25 * float(iv);
-
-            // Estimate t from current u, v
-            vec3 S = evalBezierPatch(cp, u, v);
-            vec3 toS = S - ro;
-            t = dot(toS, rd) / dot(rd, rd);
-
-            if (t < tMin || t > tMax) continue;
-
-            for (int iter = 0; iter < MAX_ITER; iter++) {
-                S = evalBezierPatch(cp, u, v);
-                vec3 Su = evalBezierPatchDu(cp, u, v);
-                vec3 Sv = evalBezierPatchDv(cp, u, v);
-
-                vec3 F = S - (ro + t * rd);
-
-                if (dot(F, F) < EPSILON * EPSILON) {
-                    if (u >= 0.0 && u <= 1.0 && v >= 0.0 && v <= 1.0 && t >= tMin && t <= tMax) {
-                        hitT = t;
-                        hitU = u;
-                        hitV = v;
-                        hitN = patchNormal(cp, u, v);
-                        return true;
-                    }
-                    break;
-                }
-
-                vec3 c0 = Su;
-                vec3 c1 = Sv;
-                vec3 c2 = -rd;
-
-                float det = dot(c0, cross(c1, c2));
-                if (abs(det) < 1e-10) break;
-
-                float invDet = 1.0 / det;
-                float du = dot(-F, cross(c1, c2)) * invDet;
-                float dv = dot(c0, cross(-F, c2)) * invDet;
-                float dt = dot(c0, cross(c1, -F)) * invDet;
-
-                u += du;
-                v += dv;
-                t += dt;
-
-                u = clamp(u, -0.1, 1.1);
-                v = clamp(v, -0.1, 1.1);
-            }
+    // Final check after max iterations
+    if (u >= 0.0 && u <= 1.0 && v >= 0.0 && v <= 1.0 && t >= tMin && t <= tMax) {
+        vec3 S = evalBezierPatch(cp, u, v);
+        vec3 F = S - (ro + t * rd);
+        if (dot(F, F) < EPSILON * 10.0) {  // Slightly relaxed tolerance
+            hitT = t;
+            hitU = u;
+            hitV = v;
+            hitN = patchNormal(cp, u, v);
+            return true;
         }
     }
 
     return false;
+}
+
+// Version with pre-computed AABB for early rejection
+bool hitBezierPatchWithAABB(vec3 cp[16], vec3 aabbMin, vec3 aabbMax,
+                             vec3 ro, vec3 rd, float tMin, float tMax,
+                             out float hitT, out float hitU, out float hitV, out vec3 hitN) {
+    // Early rejection with pre-computed AABB
+    if (!hitAABB(aabbMin, aabbMax, ro, rd, tMin, tMax)) {
+        return false;
+    }
+    return hitBezierPatch(cp, ro, rd, tMin, tMax, hitT, hitU, hitV, hitN);
 }

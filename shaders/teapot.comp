@@ -18,7 +18,12 @@ layout(push_constant) uniform PushConstants {
 
 // Patch control points: 16 vec4s per patch (w unused, for alignment)
 layout(std430, set = 0, binding = 1) readonly buffer PatchBuffer {
-    vec4 patches[];  // patches[patchIndex * 16 + pointIndex]
+    vec4 patchData[];  // patchData[patchIndex * 16 + pointIndex]
+};
+
+// Pre-computed AABBs for early rejection (2 vec4s per patch: min, max)
+layout(std430, set = 0, binding = 2) readonly buffer AABBBuffer {
+    vec4 aabbData[];  // aabbData[patchIndex * 2 + 0] = min, [1] = max
 };
 
 const float PI = 3.14159265359;
@@ -46,16 +51,25 @@ Ray getCameraRay(vec2 uv) {
 }
 
 // Check all patches for intersection
+// Uses pre-computed AABBs for efficient early rejection
 bool hitTeapot(Ray r, float tMin, float tMax,
                out float hitT, out vec3 hitN, out float hitU, out float hitV, out uint hitPatch) {
     bool hit = false;
     float closestT = tMax;
 
     for (uint p = 0; p < pc.numPatches; p++) {
+        // Early rejection with pre-computed AABB
+        vec3 aabbMin = aabbData[p * 2 + 0].xyz;
+        vec3 aabbMax = aabbData[p * 2 + 1].xyz;
+
+        if (!hitAABB(aabbMin, aabbMax, r.origin, r.direction, tMin, closestT)) {
+            continue;
+        }
+
         // Load control points for this patch
         vec3 cp[16];
         for (int i = 0; i < 16; i++) {
-            cp[i] = patches[p * 16 + i].xyz;
+            cp[i] = patchData[p * 16 + i].xyz;
         }
 
         float t, u, v;
