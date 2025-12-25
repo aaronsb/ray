@@ -539,10 +539,19 @@ void main() {
             float shadowT;
             vec3 shadowN;
             uint shadowId;
-            if (hitAllInstances(Ray(hitPoint + normal * EPSILON * 2.0, lightDir),
+            vec3 shadowOrigin = hitPoint + normal * EPSILON * 2.0;
+            if (hitAllInstances(Ray(shadowOrigin, lightDir),
                                 EPSILON, T_MAX, shadowT, shadowN, shadowId)) {
                 shadow = 0.3;
             }
+#if FEATURE_CSG
+            int shadowMat;
+            float csgShadowT;
+            vec3 csgShadowN;
+            if (hitCSG(shadowOrigin, lightDir, EPSILON, T_MAX, csgShadowT, csgShadowN, shadowMat)) {
+                shadow = 0.3;
+            }
+#endif
 #endif
             color += throughput * floorColor * (0.2 + 0.8 * NdotL * shadow);
             break;
@@ -612,10 +621,19 @@ void main() {
             float shadowT;
             vec3 shadowN;
             uint shadowId;
-            if (hitAllInstances(Ray(hitPoint + normal * EPSILON * 2.0, lightDir),
+            vec3 shadowOrigin = hitPoint + normal * EPSILON * 2.0;
+            if (hitAllInstances(Ray(shadowOrigin, lightDir),
                                 EPSILON, T_MAX, shadowT, shadowN, shadowId)) {
                 shadow = 0.3;
             }
+#if FEATURE_CSG
+            int shadowMat;
+            float csgShadowT;
+            vec3 csgShadowN;
+            if (hitCSG(shadowOrigin, lightDir, EPSILON, T_MAX, csgShadowT, csgShadowN, shadowMat)) {
+                shadow = 0.3;
+            }
+#endif
 #endif
             color += throughput * baseColor * (0.15 + 0.85 * NdotL * shadow);
             break;
