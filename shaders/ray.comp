@@ -218,13 +218,16 @@ bool hitCSG(vec3 ro, vec3 rd, float tMin, float tMax, out float hitT, out vec3 h
     }
 
     // Box intersect two spheres (peanut in box)
+    // Use distributive property: intersect(box, union(s1,s2)) = union(intersect(box,s1), intersect(box,s2))
+    // This avoids losing the second sphere when intervals are disjoint
     {
         vec3 c = vec3(6, 1, -2);
         Interval box = rayBox(ro, rd, c, vec3(1.5, 0.8, 0.8));
         Interval s1 = raySphere(ro, rd, c + vec3(-0.6, 0, 0), 1.0);
         Interval s2 = raySphere(ro, rd, c + vec3(0.6, 0, 0), 1.0);
-        Interval peanut = opUnion(s1, s2);
-        TEST_INTERVAL(opIntersect(box, peanut), CSG_MAT_RED);
+        Interval part1 = opIntersect(box, s1);
+        Interval part2 = opIntersect(box, s2);
+        TEST_INTERVAL(opUnion(part1, part2), CSG_MAT_RED);
     }
 
     // ========================================

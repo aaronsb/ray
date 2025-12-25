@@ -12,6 +12,10 @@
 //
 // ============================================================================
 
+// Epsilon for interval overlap tolerance - needs to be large enough to catch
+// grazing angle gaps where intervals should geometrically overlap but don't
+const float INTERVAL_EPS = 0.01;
+
 // --- Union (A ∪ B) ---
 // Ray is inside result when inside A OR inside B
 // For simple two-interval union, return the interval with earliest valid entry
@@ -19,9 +23,9 @@ Interval opUnion(Interval a, Interval b) {
     if (isEmpty(a)) return b;
     if (isEmpty(b)) return a;
 
-    // Both non-empty: check for overlap or gap
-    // If they overlap or touch, merge them
-    if (a.tEnter <= b.tExit && b.tEnter <= a.tExit) {
+    // Both non-empty: check for overlap or gap (with epsilon tolerance)
+    // If they overlap or nearly touch, merge them
+    if (a.tEnter <= b.tExit + INTERVAL_EPS && b.tEnter <= a.tExit + INTERVAL_EPS) {
         // Overlapping intervals - merge
         float tEnter = min(a.tEnter, b.tEnter);
         float tExit = max(a.tExit, b.tExit);
@@ -59,8 +63,8 @@ Interval opSubtract(Interval a, Interval b) {
     if (isEmpty(a)) return EMPTY_INTERVAL;
     if (isEmpty(b)) return a;  // Nothing to subtract
 
-    // Check for no overlap (B doesn't cut A)
-    if (b.tExit < a.tEnter || b.tEnter > a.tExit) {
+    // Check for no overlap (B doesn't cut A) - with epsilon tolerance
+    if (b.tExit < a.tEnter - INTERVAL_EPS || b.tEnter > a.tExit + INTERVAL_EPS) {
         return a;  // B is completely outside A
     }
 
