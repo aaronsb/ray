@@ -102,3 +102,14 @@ add_demo(ray ${CMAKE_SOURCE_DIR}/src/apps/ray
     src/apps/ray/main.cpp
     src/apps/ray/ray_renderer.cpp
 )
+
+# ============ CLI TOOLS ============
+
+# scenecheck - scene file parser/validator (no Qt GUI needed)
+add_executable(scenecheck
+    src/apps/scenecheck/main.cpp
+)
+
+target_include_directories(scenecheck PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/parametric
+)

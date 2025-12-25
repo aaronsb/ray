@@ -1,0 +1,130 @@
+; Demo scene - CSG primitives and Bezier patches
+; Scene-driven ray tracing showcase
+
+; ============================================================================
+; Includes
+; ============================================================================
+(include "teapot.scene")
+
+; ============================================================================
+; Materials
+; ============================================================================
+(material red    (type metal) (rgb 0.9 0.2 0.2) (roughness 0.05))
+(material green  (type metal) (rgb 0.2 0.8 0.3) (roughness 0.05))
+(material blue   (type metal) (rgb 0.2 0.4 0.9) (roughness 0.05))
+(material gold   (type metal) (rgb 0.83 0.69 0.22) (roughness 0.02))
+(material silver (type metal) (rgb 0.95 0.95 0.97) (roughness 0.02))
+(material glass  (type glass) (rgb 0.95 0.95 0.95) (ior 1.5))
+
+; ============================================================================
+; Row 1 (z = 6): Plain primitives
+; ============================================================================
+(shape (sphere   (at -8 1 6) (r 1.0)) red)
+(shape (box      (at -4 1 6) (half 0.8 0.8 0.8)) green)
+(shape (cylinder (at  0 0 6) (r 0.7) (h 2.0)) blue)
+(shape (cone     (at  4 0 6) (r 1.0) (h 2.0)) gold)
+(shape (torus    (at  8 1 6) (major 0.8) (minor 0.3)) silver)
+
+; ============================================================================
+; Row 2 (z = 2): CSG Subtract operations
+; ============================================================================
+
+; Sphere minus box (hole punch)
+(shape (subtract
+         (sphere (at -6 1.2 2) (r 1.2))
+         (box (at -6 1.2 2) (half 0.5 1.5 0.5)))
+       red)
+
+; Box minus sphere (rounded cavity)
+(shape (subtract
+         (box (at -2 1 2) (half 1.0 1.0 1.0))
+         (sphere (at -2 1 2) (r 1.15)))
+       green)
+
+; Cylinder minus cylinder (tube)
+(shape (subtract
+         (cylinder (at 2 0 2) (r 1.0) (h 2.0))
+         (cylinder (at 2 0 2) (r 0.6) (h 2.5)))
+       blue)
+
+; Sphere minus three boxes (dice-like cuts)
+(shape (subtract
+         (subtract
+           (subtract
+             (sphere (at 6 1.2 2) (r 1.2))
+             (box (at 6 1.2 2) (half 1.5 0.4 0.4)))
+           (box (at 6 1.2 2) (half 0.4 1.5 0.4)))
+         (box (at 6 1.2 2) (half 0.4 0.4 1.5)))
+       gold)
+
+; ============================================================================
+; Row 3 (z = -2): CSG Intersect operations
+; ============================================================================
+
+; Sphere intersect box (rounded box)
+(shape (intersect
+         (sphere (at -6 1 -2) (r 1.3))
+         (box (at -6 1 -2) (half 0.9 0.9 0.9)))
+       silver)
+
+; Two spheres intersect (lens shape)
+(shape (intersect
+         (sphere (at -2.5 1 -2) (r 1.2))
+         (sphere (at -1.5 1 -2) (r 1.2)))
+       glass)
+
+; Cylinder intersect sphere (capsule segment)
+(shape (intersect
+         (cylinder (at 2 -0.5 -2) (r 0.8) (h 3.0))
+         (sphere (at 2 1 -2) (r 1.3)))
+       blue)
+
+; Box intersect two spheres (peanut in box)
+(shape (union
+         (intersect
+           (box (at 6 1 -2) (half 1.5 0.8 0.8))
+           (sphere (at 5.4 1 -2) (r 1.0)))
+         (intersect
+           (box (at 6 1 -2) (half 1.5 0.8 0.8))
+           (sphere (at 6.6 1 -2) (r 1.0))))
+       red)
+
+; ============================================================================
+; Row 4 (z = -6): CSG Union + complex
+; ============================================================================
+
+; Union of sphere and box
+(shape (union
+         (sphere (at -6 1.2 -6) (r 0.9))
+         (box (at -6 0.5 -6) (half 0.6 0.5 0.6)))
+       green)
+
+; Snowman (three spheres)
+(shape (union
+         (union
+           (sphere (at -2 0.6 -6) (r 0.6))
+           (sphere (at -2 1.5 -6) (r 0.45)))
+         (sphere (at -2 2.2 -6) (r 0.3)))
+       silver)
+
+; Cylinder with spherical ends (capsule via CSG)
+(shape (union
+         (union
+           (cylinder (at 2 0 -6) (r 0.5) (h 2.0))
+           (sphere (at 2 0 -6) (r 0.5)))
+         (sphere (at 2 2 -6) (r 0.5)))
+       gold)
+
+; Complex: (sphere union cylinder) minus box
+(shape (subtract
+         (union
+           (sphere (at 6 1 -6) (r 1.0))
+           (cylinder (at 6 0 -6) (r 0.4) (h 2.0)))
+         (box (at 6.5 1 -6) (half 0.8 1.5 0.3)))
+       blue)
+
+; ============================================================================
+; Bezier Patch Instances (Utah Teapot)
+; ============================================================================
+(instance teapot (at -10 0 0) (scale 0.5) (rotate 0 90 0) silver)
+(instance teapot (at  10 0 0) (scale 0.5) (rotate 0 -90 0) glass)

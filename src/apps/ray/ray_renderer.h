@@ -10,6 +10,7 @@
 #include "../../parametric/bezier/patch_group.h"
 #include "../../parametric/csg/csg.h"
 #include "../../parametric/materials/material.h"
+#include "../../parametric/scene/scene_loader.h"
 
 using parametric::BezierInstance;
 using parametric::BezierPatchGroup;
@@ -85,7 +86,7 @@ struct RayCamera {
 class RayRenderer : public QVulkanWindowRenderer {
 public:
     explicit RayRenderer(QVulkanWindow* window,
-                         std::vector<Patch> patches);
+                         const QString& scenePath = QString());
 
     void initResources() override;
     void initSwapChainResources() override;
@@ -106,6 +107,7 @@ public:
 private:
     QVulkanWindow* m_window;
     QVulkanDeviceFunctions* m_devFuncs = nullptr;
+    QString m_scenePath;  // Scene file path (empty = use default)
 
     // Patch data
     BezierPatchGroup m_patchGroup;
@@ -198,9 +200,6 @@ private:
 class RayWindow : public QVulkanWindow {
     Q_OBJECT
 public:
-    void setPatches(std::vector<Patch> patches) {
-        m_patches = std::move(patches);
-    }
     QVulkanWindowRenderer* createRenderer() override;
 
     RayRenderer* renderer() const { return m_renderer; }
@@ -211,6 +210,10 @@ public:
         m_screenshotWaitFrames = waitFrames;
         m_screenshotExitAfter = exitAfter;
     }
+
+    // Scene file path (empty = use default scenes/demo.scene)
+    void setScenePath(const QString& path) { m_scenePath = path; }
+    const QString& scenePath() const { return m_scenePath; }
 
 public slots:
     void checkScreenshotReady();
@@ -223,7 +226,6 @@ protected:
     void keyPressEvent(QKeyEvent* event) override;
 
 private:
-    std::vector<Patch> m_patches;
     RayRenderer* m_renderer = nullptr;
     QPointF m_lastMousePos;
     bool m_leftMousePressed = false;
@@ -233,4 +235,7 @@ private:
     QString m_screenshotFilename;
     uint32_t m_screenshotWaitFrames = 0;
     bool m_screenshotExitAfter = false;
+
+    // Scene file
+    QString m_scenePath;
 };

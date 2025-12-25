@@ -2,6 +2,7 @@
 #include "../../parametric/materials/presets/metals.h"
 #include "../../parametric/materials/presets/glass.h"
 #include "../../parametric/materials/presets/diffuse.h"
+#include "../../parametric/scene/scene_loader.h"
 #include <QFile>
 #include <QFileInfo>
 #include <QVulkanFunctions>
@@ -12,31 +13,60 @@
 #include <QImage>
 #include <QDateTime>
 #include <QTimer>
+#include <algorithm>
 #include <cstring>
+#include <fstream>
+#include <sstream>
 
 RayRenderer::RayRenderer(QVulkanWindow* window,
-                               std::vector<Patch> patches)
-    : m_window(window)
+                               const QString& scenePath)
+    : m_window(window), m_scenePath(scenePath)
 {
-    m_patchGroup.build(patches);
 }
 
 void RayRenderer::initResources() {
     m_devFuncs = m_window->vulkanInstance()->deviceFunctions(m_window->device());
     m_frameTimer.start();
 
-    const float PI = 3.14159265f;
+    // Try loading scene from file (empty path = empty scene)
+    bool sceneLoaded = false;
+    if (!m_scenePath.isEmpty() && QFile::exists(m_scenePath)) {
+        parametric::SceneData sceneData;
+        if (parametric::SceneLoader::loadFile(m_scenePath.toStdString(), sceneData)) {
+            printf("Loaded scene from %s\n", qPrintable(m_scenePath));
 
-    // Teapot instances - reduced to showcase alongside CSG scene
-    // Format: {posX, posY, posZ, scale, rotX, rotY, rotZ, materialId}
-    m_instances = {
-        {-10.0f, 0.0f, 0.0f, 0.5f, 0.0f, PI * 0.5f, 0.0f, 1},  // Polished silver
-        { 10.0f, 0.0f, 0.0f, 0.5f, 0.0f, -PI * 0.5f, 0.0f, 4}, // Clear glass
-    };
+            // Transfer data to renderer members
+            m_csgScene = std::move(sceneData.csg);
+            m_materials = std::move(sceneData.materials);
 
-    // Build material library and CSG scene
-    buildMaterialLibrary();
-    buildCSGScene();
+            // Build patches from scene data
+            auto patches = sceneData.allPatches();
+            if (!patches.empty()) {
+                m_patchGroup.build(patches);
+                printf("  Patches:    %zu groups, %zu total patches\n",
+                       sceneData.patchGroups.size(), patches.size());
+            }
+
+            // Build instances from scene data
+            m_instances = sceneData.buildInstances();
+
+            printf("  Materials:  %u\n", m_materials.count());
+            printf("  Primitives: %u\n", m_csgScene.primitiveCount());
+            printf("  Nodes:      %u\n", m_csgScene.nodeCount());
+            printf("  Roots:      %u\n", m_csgScene.rootCount());
+            printf("  Instances:  %zu\n", m_instances.size());
+            sceneLoaded = true;
+        } else {
+            fprintf(stderr, "Failed to parse scene file: %s\n", qPrintable(m_scenePath));
+        }
+    } else if (!m_scenePath.isEmpty()) {
+        fprintf(stderr, "Scene file not found: %s\n", qPrintable(m_scenePath));
+    }
+
+    // Empty scene if no file loaded
+    if (!sceneLoaded) {
+        printf("No scene file loaded (empty scene)\n");
+    }
 
     createPatchBuffers();
     createComputePipeline();
@@ -181,7 +211,7 @@ void RayRenderer::startNextFrame() {
     m_lastFrameTime = now;
 
     // Update window title with FPS
-    m_window->setTitle(QString("Utah Teapot - %1 fps").arg(static_cast<int>(m_fps)));
+    m_window->setTitle(QString("Ray's Bouncy Castle - %1 fps").arg(static_cast<int>(m_fps)));
 
     VkCommandBuffer cmdBuf = m_window->currentCommandBuffer();
     recordComputeCommands(cmdBuf);
@@ -237,9 +267,11 @@ void RayRenderer::createPatchBuffers() {
     const auto& bvhNodes = m_patchGroup.bvhNodes();
     const auto& patchIndices = m_patchGroup.patchIndices();
 
-    size_t patchDataSize = patchData.size() * sizeof(float);
-    size_t bvhSize = bvhNodes.size() * sizeof(BVHNode);
-    size_t indexSize = patchIndices.size() * sizeof(uint32_t);
+    // Minimum sizes to avoid empty buffer issues
+    size_t patchDataSize = std::max(patchData.size() * sizeof(float), size_t(64));
+    size_t bvhSize = std::max(bvhNodes.size() * sizeof(BVHNode), size_t(32));
+    size_t indexSize = std::max(patchIndices.size() * sizeof(uint32_t), size_t(4));
+    size_t instanceSize = std::max(m_instances.size() * sizeof(BezierInstance), size_t(32));
 
     // Patch data: 16 vec4s per patch (control points)
     createBuffer(patchDataSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
@@ -256,30 +288,44 @@ void RayRenderer::createPatchBuffers() {
                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                  m_patchIndexBuffer, m_patchIndexBufferMemory);
 
-    // Upload patch control points
-    void* data;
-    m_devFuncs->vkMapMemory(dev, m_patchBufferMemory, 0, patchDataSize, 0, &data);
-    memcpy(data, patchData.data(), patchDataSize);
-    m_devFuncs->vkUnmapMemory(dev, m_patchBufferMemory);
-
-    // Upload BVH nodes
-    m_devFuncs->vkMapMemory(dev, m_bvhBufferMemory, 0, bvhSize, 0, &data);
-    memcpy(data, bvhNodes.data(), bvhSize);
-    m_devFuncs->vkUnmapMemory(dev, m_bvhBufferMemory);
-
-    // Upload patch indices
-    m_devFuncs->vkMapMemory(dev, m_patchIndexBufferMemory, 0, indexSize, 0, &data);
-    memcpy(data, patchIndices.data(), indexSize);
-    m_devFuncs->vkUnmapMemory(dev, m_patchIndexBufferMemory);
-
     // Instance buffer
-    size_t instanceSize = m_instances.size() * sizeof(BezierInstance);
     createBuffer(instanceSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                  m_instanceBuffer, m_instanceBufferMemory);
 
+    // Upload data (zero-initialize if empty)
+    void* data;
+
+    m_devFuncs->vkMapMemory(dev, m_patchBufferMemory, 0, patchDataSize, 0, &data);
+    if (!patchData.empty()) {
+        memcpy(data, patchData.data(), patchData.size() * sizeof(float));
+    } else {
+        memset(data, 0, patchDataSize);
+    }
+    m_devFuncs->vkUnmapMemory(dev, m_patchBufferMemory);
+
+    m_devFuncs->vkMapMemory(dev, m_bvhBufferMemory, 0, bvhSize, 0, &data);
+    if (!bvhNodes.empty()) {
+        memcpy(data, bvhNodes.data(), bvhNodes.size() * sizeof(BVHNode));
+    } else {
+        memset(data, 0, bvhSize);
+    }
+    m_devFuncs->vkUnmapMemory(dev, m_bvhBufferMemory);
+
+    m_devFuncs->vkMapMemory(dev, m_patchIndexBufferMemory, 0, indexSize, 0, &data);
+    if (!patchIndices.empty()) {
+        memcpy(data, patchIndices.data(), patchIndices.size() * sizeof(uint32_t));
+    } else {
+        memset(data, 0, indexSize);
+    }
+    m_devFuncs->vkUnmapMemory(dev, m_patchIndexBufferMemory);
+
     m_devFuncs->vkMapMemory(dev, m_instanceBufferMemory, 0, instanceSize, 0, &data);
-    memcpy(data, m_instances.data(), instanceSize);
+    if (!m_instances.empty()) {
+        memcpy(data, m_instances.data(), m_instances.size() * sizeof(BezierInstance));
+    } else {
+        memset(data, 0, instanceSize);
+    }
     m_devFuncs->vkUnmapMemory(dev, m_instanceBufferMemory);
 
     printf("Uploaded %u patches + %u BVH nodes + %zu instances (%.1f KB total)\n",
@@ -1161,7 +1207,7 @@ bool RayRenderer::saveScreenshot(const QString& filename) {
 // RayWindow implementation
 
 QVulkanWindowRenderer* RayWindow::createRenderer() {
-    m_renderer = new RayRenderer(this, std::move(m_patches));
+    m_renderer = new RayRenderer(this, m_scenePath);
     return m_renderer;
 }
 
