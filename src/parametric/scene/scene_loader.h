@@ -81,15 +81,6 @@ public:
         return loadString(buffer.str(), data, basePath);
     }
 
-    // Legacy API: load into separate CSGScene and MaterialLibrary
-    static bool loadFile(const std::string& path, CSGScene& scene, MaterialLibrary& materials) {
-        SceneData data;
-        if (!loadFile(path, data)) return false;
-        scene = std::move(data.csg);
-        materials = std::move(data.materials);
-        return true;
-    }
-
     // Load scene from string
     static bool loadString(const std::string& source, SceneData& data, const std::string& basePath = "") {
         try {
@@ -103,15 +94,6 @@ public:
             fprintf(stderr, "Scene load error: %s\n", e.what());
             return false;
         }
-    }
-
-    // Legacy API
-    static bool loadString(const std::string& source, CSGScene& scene, MaterialLibrary& materials) {
-        SceneData data;
-        if (!loadString(source, data, "")) return false;
-        scene = std::move(data.csg);
-        materials = std::move(data.materials);
-        return true;
     }
 
 private:

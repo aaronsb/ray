@@ -1,7 +1,4 @@
 #include "ray_renderer.h"
-#include "../../parametric/materials/presets/metals.h"
-#include "../../parametric/materials/presets/glass.h"
-#include "../../parametric/materials/presets/diffuse.h"
 #include "../../parametric/scene/scene_loader.h"
 #include <QFile>
 #include <QFileInfo>
@@ -15,8 +12,6 @@
 #include <QTimer>
 #include <algorithm>
 #include <cstring>
-#include <fstream>
-#include <sstream>
 
 RayRenderer::RayRenderer(QVulkanWindow* window,
                                const QString& scenePath)
@@ -706,26 +701,6 @@ void RayRenderer::recordComputeCommands(VkCommandBuffer cmdBuf) {
         0, 0, nullptr, 0, nullptr, 1, &barrier);
 }
 
-void RayRenderer::buildMaterialLibrary() {
-    using namespace parametric;
-
-    // Add materials in order - indices match CSG material references
-    // Index 0: Red metal
-    m_materials.add("red", metals::redMetal());
-    // Index 1: Green metal
-    m_materials.add("green", metals::greenMetal());
-    // Index 2: Blue metal
-    m_materials.add("blue", metals::blueMetal());
-    // Index 3: Gold
-    m_materials.add("gold", metals::gold());
-    // Index 4: Silver
-    m_materials.add("silver", metals::silver());
-    // Index 5: Glass
-    m_materials.add("glass", glass::clear());
-
-    printf("Material library: %u materials\n", m_materials.count());
-}
-
 void RayRenderer::createMaterialBuffer() {
     VkDevice dev = m_window->device();
 
@@ -742,180 +717,6 @@ void RayRenderer::createMaterialBuffer() {
         memcpy(data, mats.data(), mats.size() * sizeof(Material));
         m_devFuncs->vkUnmapMemory(dev, m_materialBufferMemory);
     }
-}
-
-void RayRenderer::buildCSGScene() {
-    // Material lookup from library
-    uint32_t MAT_RED = m_materials.find("red");
-    uint32_t MAT_GREEN = m_materials.find("green");
-    uint32_t MAT_BLUE = m_materials.find("blue");
-    uint32_t MAT_GOLD = m_materials.find("gold");
-    uint32_t MAT_SILVER = m_materials.find("silver");
-    uint32_t MAT_GLASS = m_materials.find("glass");
-
-    // ========================================
-    // Row 1 (z = 6): Plain primitives
-    // ========================================
-    m_csgScene.addSphereShape(-8, 1, 6, 1.0f, MAT_RED);
-    m_csgScene.addBoxShape(-4, 1, 6, 0.8f, 0.8f, 0.8f, MAT_GREEN);
-    m_csgScene.addCylinderShape(0, 0, 6, 0.7f, 2.0f, MAT_BLUE);
-    m_csgScene.addConeShape(4, 0, 6, 1.0f, 2.0f, MAT_GOLD);
-    m_csgScene.addTorusShape(8, 1, 6, 0.8f, 0.3f, MAT_SILVER);
-
-    // ========================================
-    // Row 2 (z = 2): CSG Subtract operations
-    // ========================================
-
-    // Sphere minus box (classic hole punch)
-    {
-        uint32_t s = m_csgScene.addSphere(-6, 1.2f, 2, 1.2f);
-        uint32_t b = m_csgScene.addBox(-6, 1.2f, 2, 0.5f, 1.5f, 0.5f);
-        uint32_t sn = m_csgScene.addPrimitiveNode(s, MAT_RED);
-        uint32_t bn = m_csgScene.addPrimitiveNode(b, MAT_RED);
-        uint32_t root = m_csgScene.addSubtract(sn, bn, MAT_RED);
-        m_csgScene.addRoot(root);
-    }
-
-    // Box minus sphere (rounded cavity)
-    {
-        uint32_t b = m_csgScene.addBox(-2, 1, 2, 1.0f, 1.0f, 1.0f);
-        uint32_t s = m_csgScene.addSphere(-2, 1, 2, 1.15f);
-        uint32_t bn = m_csgScene.addPrimitiveNode(b, MAT_GREEN);
-        uint32_t sn = m_csgScene.addPrimitiveNode(s, MAT_GREEN);
-        uint32_t root = m_csgScene.addSubtract(bn, sn, MAT_GREEN);
-        m_csgScene.addRoot(root);
-    }
-
-    // Cylinder minus cylinder (tube)
-    {
-        uint32_t outer = m_csgScene.addCylinder(2, 0, 2, 1.0f, 2.0f);
-        uint32_t inner = m_csgScene.addCylinder(2, 0, 2, 0.6f, 2.5f);
-        uint32_t on = m_csgScene.addPrimitiveNode(outer, MAT_BLUE);
-        uint32_t in = m_csgScene.addPrimitiveNode(inner, MAT_BLUE);
-        uint32_t root = m_csgScene.addSubtract(on, in, MAT_BLUE);
-        m_csgScene.addRoot(root);
-    }
-
-    // Sphere minus three boxes (dice-like cuts)
-    {
-        uint32_t s = m_csgScene.addSphere(6, 1.2f, 2, 1.2f);
-        uint32_t bx = m_csgScene.addBox(6, 1.2f, 2, 1.5f, 0.4f, 0.4f);
-        uint32_t by = m_csgScene.addBox(6, 1.2f, 2, 0.4f, 1.5f, 0.4f);
-        uint32_t bz = m_csgScene.addBox(6, 1.2f, 2, 0.4f, 0.4f, 1.5f);
-        uint32_t sn = m_csgScene.addPrimitiveNode(s, MAT_GOLD);
-        uint32_t bxn = m_csgScene.addPrimitiveNode(bx, MAT_GOLD);
-        uint32_t byn = m_csgScene.addPrimitiveNode(by, MAT_GOLD);
-        uint32_t bzn = m_csgScene.addPrimitiveNode(bz, MAT_GOLD);
-        uint32_t sub1 = m_csgScene.addSubtract(sn, bxn, MAT_GOLD);
-        uint32_t sub2 = m_csgScene.addSubtract(sub1, byn, MAT_GOLD);
-        uint32_t root = m_csgScene.addSubtract(sub2, bzn, MAT_GOLD);
-        m_csgScene.addRoot(root);
-    }
-
-    // ========================================
-    // Row 3 (z = -2): CSG Intersect operations
-    // ========================================
-
-    // Sphere intersect box (rounded box)
-    {
-        uint32_t s = m_csgScene.addSphere(-6, 1, -2, 1.3f);
-        uint32_t b = m_csgScene.addBox(-6, 1, -2, 0.9f, 0.9f, 0.9f);
-        uint32_t sn = m_csgScene.addPrimitiveNode(s, MAT_SILVER);
-        uint32_t bn = m_csgScene.addPrimitiveNode(b, MAT_SILVER);
-        uint32_t root = m_csgScene.addIntersect(sn, bn, MAT_SILVER);
-        m_csgScene.addRoot(root);
-    }
-
-    // Two spheres intersect (lens shape)
-    {
-        uint32_t s1 = m_csgScene.addSphere(-2.5f, 1, -2, 1.2f);
-        uint32_t s2 = m_csgScene.addSphere(-1.5f, 1, -2, 1.2f);
-        uint32_t sn1 = m_csgScene.addPrimitiveNode(s1, MAT_GLASS);
-        uint32_t sn2 = m_csgScene.addPrimitiveNode(s2, MAT_GLASS);
-        uint32_t root = m_csgScene.addIntersect(sn1, sn2, MAT_GLASS);
-        m_csgScene.addRoot(root);
-    }
-
-    // Cylinder intersect sphere (capsule segment)
-    {
-        uint32_t cyl = m_csgScene.addCylinder(2, -0.5f, -2, 0.8f, 3.0f);
-        uint32_t s = m_csgScene.addSphere(2, 1, -2, 1.3f);
-        uint32_t cn = m_csgScene.addPrimitiveNode(cyl, MAT_BLUE);
-        uint32_t sn = m_csgScene.addPrimitiveNode(s, MAT_BLUE);
-        uint32_t root = m_csgScene.addIntersect(cn, sn, MAT_BLUE);
-        m_csgScene.addRoot(root);
-    }
-
-    // Box intersect two spheres (peanut in box) - uses distributive property
-    {
-        uint32_t box = m_csgScene.addBox(6, 1, -2, 1.5f, 0.8f, 0.8f);
-        uint32_t s1 = m_csgScene.addSphere(6 - 0.6f, 1, -2, 1.0f);
-        uint32_t s2 = m_csgScene.addSphere(6 + 0.6f, 1, -2, 1.0f);
-        uint32_t boxn = m_csgScene.addPrimitiveNode(box, MAT_RED);
-        uint32_t sn1 = m_csgScene.addPrimitiveNode(s1, MAT_RED);
-        uint32_t sn2 = m_csgScene.addPrimitiveNode(s2, MAT_RED);
-        // Distributive: intersect(box, union(s1,s2)) = union(intersect(box,s1), intersect(box,s2))
-        uint32_t part1 = m_csgScene.addIntersect(boxn, sn1, MAT_RED);
-        uint32_t part2 = m_csgScene.addIntersect(boxn, sn2, MAT_RED);
-        uint32_t root = m_csgScene.addUnion(part1, part2, MAT_RED);
-        m_csgScene.addRoot(root);
-    }
-
-    // ========================================
-    // Row 4 (z = -6): CSG Union + complex
-    // ========================================
-
-    // Union of sphere and box
-    {
-        uint32_t s = m_csgScene.addSphere(-6, 1.2f, -6, 0.9f);
-        uint32_t b = m_csgScene.addBox(-6, 0.5f, -6, 0.6f, 0.5f, 0.6f);
-        uint32_t sn = m_csgScene.addPrimitiveNode(s, MAT_GREEN);
-        uint32_t bn = m_csgScene.addPrimitiveNode(b, MAT_GREEN);
-        uint32_t root = m_csgScene.addUnion(sn, bn, MAT_GREEN);
-        m_csgScene.addRoot(root);
-    }
-
-    // Snowman (three spheres)
-    {
-        uint32_t s1 = m_csgScene.addSphere(-2, 0.6f, -6, 0.6f);
-        uint32_t s2 = m_csgScene.addSphere(-2, 1.5f, -6, 0.45f);
-        uint32_t s3 = m_csgScene.addSphere(-2, 2.2f, -6, 0.3f);
-        uint32_t sn1 = m_csgScene.addPrimitiveNode(s1, MAT_SILVER);
-        uint32_t sn2 = m_csgScene.addPrimitiveNode(s2, MAT_SILVER);
-        uint32_t sn3 = m_csgScene.addPrimitiveNode(s3, MAT_SILVER);
-        uint32_t u1 = m_csgScene.addUnion(sn1, sn2, MAT_SILVER);
-        uint32_t root = m_csgScene.addUnion(u1, sn3, MAT_SILVER);
-        m_csgScene.addRoot(root);
-    }
-
-    // Cylinder with spherical ends (capsule via CSG)
-    {
-        uint32_t cyl = m_csgScene.addCylinder(2, 0, -6, 0.5f, 2.0f);
-        uint32_t s1 = m_csgScene.addSphere(2, 0, -6, 0.5f);
-        uint32_t s2 = m_csgScene.addSphere(2, 2, -6, 0.5f);
-        uint32_t cn = m_csgScene.addPrimitiveNode(cyl, MAT_GOLD);
-        uint32_t sn1 = m_csgScene.addPrimitiveNode(s1, MAT_GOLD);
-        uint32_t sn2 = m_csgScene.addPrimitiveNode(s2, MAT_GOLD);
-        uint32_t u1 = m_csgScene.addUnion(cn, sn1, MAT_GOLD);
-        uint32_t root = m_csgScene.addUnion(u1, sn2, MAT_GOLD);
-        m_csgScene.addRoot(root);
-    }
-
-    // Complex: (sphere union cylinder) minus box
-    {
-        uint32_t sph = m_csgScene.addSphere(6, 1, -6, 1.0f);
-        uint32_t cyl = m_csgScene.addCylinder(6, 0, -6, 0.4f, 2.0f);
-        uint32_t box = m_csgScene.addBox(6.5f, 1, -6, 0.8f, 1.5f, 0.3f);
-        uint32_t sphn = m_csgScene.addPrimitiveNode(sph, MAT_BLUE);
-        uint32_t cyln = m_csgScene.addPrimitiveNode(cyl, MAT_BLUE);
-        uint32_t boxn = m_csgScene.addPrimitiveNode(box, MAT_BLUE);
-        uint32_t combo = m_csgScene.addUnion(sphn, cyln, MAT_BLUE);
-        uint32_t root = m_csgScene.addSubtract(combo, boxn, MAT_BLUE);
-        m_csgScene.addRoot(root);
-    }
-
-    printf("CSG scene: %u primitives, %u nodes, %u roots\n",
-           m_csgScene.primitiveCount(), m_csgScene.nodeCount(), m_csgScene.rootCount());
 }
 
 void RayRenderer::createCSGBuffers() {

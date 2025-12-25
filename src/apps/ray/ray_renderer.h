@@ -177,8 +177,6 @@ private:
     void createStorageImage();
     void createPatchBuffers();
     void createCSGBuffers();
-    void buildCSGScene();
-    void buildMaterialLibrary();
     void createMaterialBuffer();
     void createDescriptorSet();
     void createComputePipeline();
