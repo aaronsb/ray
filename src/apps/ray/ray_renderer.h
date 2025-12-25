@@ -9,6 +9,7 @@
 #include <vector>
 #include "../../parametric/bezier/patch_group.h"
 #include "../../parametric/csg/csg.h"
+#include "../../parametric/materials/material.h"
 
 using parametric::BezierInstance;
 using parametric::BezierPatchGroup;
@@ -18,6 +19,8 @@ using parametric::BVHNode;
 using parametric::CSGScene;
 using parametric::CSGPrimitive;
 using parametric::CSGNode;
+using parametric::Material;
+using parametric::MaterialLibrary;
 
 // Push constants matching ray.comp
 struct RayPushConstants {
@@ -32,7 +35,7 @@ struct RayPushConstants {
     uint32_t numCSGPrimitives;
     uint32_t numCSGNodes;
     uint32_t numCSGRoots;
-    uint32_t _pad;
+    uint32_t numMaterials;
 };
 
 // Simple orbit camera
@@ -112,6 +115,9 @@ private:
     // CSG scene data
     CSGScene m_csgScene;
 
+    // Material library
+    MaterialLibrary m_materials;
+
     // Vulkan resources
     VkPipeline m_computePipeline = VK_NULL_HANDLE;
     VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
@@ -153,6 +159,10 @@ private:
     VkBuffer m_csgRootBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_csgRootBufferMemory = VK_NULL_HANDLE;
 
+    // Material buffer
+    VkBuffer m_materialBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_materialBufferMemory = VK_NULL_HANDLE;
+
     // Frame tracking
     uint32_t m_frameIndex = 0;
     bool m_needsImageTransition = true;
@@ -166,6 +176,8 @@ private:
     void createPatchBuffers();
     void createCSGBuffers();
     void buildCSGScene();
+    void buildMaterialLibrary();
+    void createMaterialBuffer();
     void createDescriptorSet();
     void createComputePipeline();
     void recordComputeCommands(VkCommandBuffer cmdBuf);

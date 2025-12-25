@@ -1,4 +1,7 @@
 #include "ray_renderer.h"
+#include "../../parametric/materials/presets/metals.h"
+#include "../../parametric/materials/presets/glass.h"
+#include "../../parametric/materials/presets/diffuse.h"
 #include <QFile>
 #include <QFileInfo>
 #include <QVulkanFunctions>
@@ -18,14 +21,6 @@ RayRenderer::RayRenderer(QVulkanWindow* window,
     m_patchGroup.build(patches);
 }
 
-// Material IDs for CSG (matches shader)
-#define CSG_MAT_RED     0
-#define CSG_MAT_GREEN   1
-#define CSG_MAT_BLUE    2
-#define CSG_MAT_GOLD    3
-#define CSG_MAT_SILVER  4
-#define CSG_MAT_GLASS   5
-
 void RayRenderer::initResources() {
     m_devFuncs = m_window->vulkanInstance()->deviceFunctions(m_window->device());
     m_frameTimer.start();
@@ -39,7 +34,8 @@ void RayRenderer::initResources() {
         { 10.0f, 0.0f, 0.0f, 0.5f, 0.0f, -PI * 0.5f, 0.0f, 4}, // Clear glass
     };
 
-    // Build CSG scene (matches the hardcoded scene in ray.comp)
+    // Build material library and CSG scene
+    buildMaterialLibrary();
     buildCSGScene();
 
     createPatchBuffers();
@@ -163,6 +159,16 @@ void RayRenderer::releaseResources() {
         m_devFuncs->vkFreeMemory(dev, m_csgRootBufferMemory, nullptr);
         m_csgRootBufferMemory = VK_NULL_HANDLE;
     }
+
+    // Material buffer
+    if (m_materialBuffer) {
+        m_devFuncs->vkDestroyBuffer(dev, m_materialBuffer, nullptr);
+        m_materialBuffer = VK_NULL_HANDLE;
+    }
+    if (m_materialBufferMemory) {
+        m_devFuncs->vkFreeMemory(dev, m_materialBufferMemory, nullptr);
+        m_materialBufferMemory = VK_NULL_HANDLE;
+    }
 }
 
 void RayRenderer::startNextFrame() {
@@ -280,17 +286,18 @@ void RayRenderer::createPatchBuffers() {
            m_patchGroup.subPatchCount(), m_patchGroup.bvhNodeCount(), m_instances.size(),
            (patchDataSize + bvhSize + indexSize + instanceSize) / 1024.0f);
 
-    // Create CSG buffers
+    // Create CSG and material buffers
     createCSGBuffers();
+    createMaterialBuffer();
 }
 
 void RayRenderer::createDescriptorSet() {
     VkDevice dev = m_window->device();
 
-    // Create descriptor pool (2 images + 7 buffers)
+    // Create descriptor pool (2 images + 8 buffers)
     std::array<VkDescriptorPoolSize, 2> poolSizes{};
     poolSizes[0] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2};  // output + accumulation
-    poolSizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 7};  // patches, BVH, indices, instances, CSG prims/nodes/roots
+    poolSizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8};  // patches, BVH, indices, instances, CSG prims/nodes/roots, materials
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -357,7 +364,12 @@ void RayRenderer::createDescriptorSet() {
     csgRootBufferInfo.offset = 0;
     csgRootBufferInfo.range = VK_WHOLE_SIZE;
 
-    std::array<VkWriteDescriptorSet, 9> writes{};
+    VkDescriptorBufferInfo materialBufferInfo{};
+    materialBufferInfo.buffer = m_materialBuffer;
+    materialBufferInfo.offset = 0;
+    materialBufferInfo.range = VK_WHOLE_SIZE;
+
+    std::array<VkWriteDescriptorSet, 10> writes{};
 
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[0].dstSet = m_descriptorSet;
@@ -423,14 +435,22 @@ void RayRenderer::createDescriptorSet() {
     writes[8].descriptorCount = 1;
     writes[8].pBufferInfo = &csgRootBufferInfo;
 
+    // Material buffer (binding 9)
+    writes[9].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[9].dstSet = m_descriptorSet;
+    writes[9].dstBinding = 9;
+    writes[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[9].descriptorCount = 1;
+    writes[9].pBufferInfo = &materialBufferInfo;
+
     m_devFuncs->vkUpdateDescriptorSets(dev, writes.size(), writes.data(), 0, nullptr);
 }
 
 void RayRenderer::createComputePipeline() {
     VkDevice dev = m_window->device();
 
-    // Descriptor set layout (9 bindings: output image, 4 buffers, accum image, 3 CSG buffers)
-    std::array<VkDescriptorSetLayoutBinding, 9> bindings{};
+    // Descriptor set layout (10 bindings: output image, 4 buffers, accum image, 3 CSG buffers, materials)
+    std::array<VkDescriptorSetLayoutBinding, 10> bindings{};
 
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -477,6 +497,12 @@ void RayRenderer::createComputePipeline() {
     bindings[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[8].descriptorCount = 1;
     bindings[8].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    // Material buffer (binding 9)
+    bindings[9].binding = 9;
+    bindings[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[9].descriptorCount = 1;
+    bindings[9].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -560,6 +586,7 @@ void RayRenderer::recordComputeCommands(VkCommandBuffer cmdBuf) {
     pc.numCSGPrimitives = m_csgScene.primitiveCount();
     pc.numCSGNodes = m_csgScene.nodeCount();
     pc.numCSGRoots = m_csgScene.rootCount();
+    pc.numMaterials = m_materials.count();
 
     m_devFuncs->vkCmdPushConstants(cmdBuf, m_pipelineLayout,
         VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RayPushConstants), &pc);
@@ -633,18 +660,61 @@ void RayRenderer::recordComputeCommands(VkCommandBuffer cmdBuf) {
         0, 0, nullptr, 0, nullptr, 1, &barrier);
 }
 
+void RayRenderer::buildMaterialLibrary() {
+    using namespace parametric;
+
+    // Add materials in order - indices match CSG material references
+    // Index 0: Red metal
+    m_materials.add("red", metals::redMetal());
+    // Index 1: Green metal
+    m_materials.add("green", metals::greenMetal());
+    // Index 2: Blue metal
+    m_materials.add("blue", metals::blueMetal());
+    // Index 3: Gold
+    m_materials.add("gold", metals::gold());
+    // Index 4: Silver
+    m_materials.add("silver", metals::silver());
+    // Index 5: Glass
+    m_materials.add("glass", glass::clear());
+
+    printf("Material library: %u materials\n", m_materials.count());
+}
+
+void RayRenderer::createMaterialBuffer() {
+    VkDevice dev = m_window->device();
+
+    const auto& mats = m_materials.materials();
+    size_t matSize = std::max(mats.size() * sizeof(Material), size_t(32));
+
+    createBuffer(matSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 m_materialBuffer, m_materialBufferMemory);
+
+    if (!mats.empty()) {
+        void* data;
+        m_devFuncs->vkMapMemory(dev, m_materialBufferMemory, 0, matSize, 0, &data);
+        memcpy(data, mats.data(), mats.size() * sizeof(Material));
+        m_devFuncs->vkUnmapMemory(dev, m_materialBufferMemory);
+    }
+}
+
 void RayRenderer::buildCSGScene() {
-    // Build CSG scene matching the hardcoded scene in ray.comp
-    // Material IDs: RED=0, GREEN=1, BLUE=2, GOLD=3, SILVER=4, GLASS=5
+    // Material lookup from library
+    uint32_t MAT_RED = m_materials.find("red");
+    uint32_t MAT_GREEN = m_materials.find("green");
+    uint32_t MAT_BLUE = m_materials.find("blue");
+    uint32_t MAT_GOLD = m_materials.find("gold");
+    uint32_t MAT_SILVER = m_materials.find("silver");
+    uint32_t MAT_GLASS = m_materials.find("glass");
 
     // ========================================
     // Row 1 (z = 6): Plain primitives
     // ========================================
-    m_csgScene.addSphereShape(-8, 1, 6, 1.0f, CSG_MAT_RED);
-    m_csgScene.addBoxShape(-4, 1, 6, 0.8f, 0.8f, 0.8f, CSG_MAT_GREEN);
-    m_csgScene.addCylinderShape(0, 0, 6, 0.7f, 2.0f, CSG_MAT_BLUE);
-    m_csgScene.addConeShape(4, 0, 6, 1.0f, 2.0f, CSG_MAT_GOLD);
-    m_csgScene.addTorusShape(8, 1, 6, 0.8f, 0.3f, CSG_MAT_SILVER);
+    m_csgScene.addSphereShape(-8, 1, 6, 1.0f, MAT_RED);
+    m_csgScene.addBoxShape(-4, 1, 6, 0.8f, 0.8f, 0.8f, MAT_GREEN);
+    m_csgScene.addCylinderShape(0, 0, 6, 0.7f, 2.0f, MAT_BLUE);
+    m_csgScene.addConeShape(4, 0, 6, 1.0f, 2.0f, MAT_GOLD);
+    m_csgScene.addTorusShape(8, 1, 6, 0.8f, 0.3f, MAT_SILVER);
 
     // ========================================
     // Row 2 (z = 2): CSG Subtract operations
@@ -654,9 +724,9 @@ void RayRenderer::buildCSGScene() {
     {
         uint32_t s = m_csgScene.addSphere(-6, 1.2f, 2, 1.2f);
         uint32_t b = m_csgScene.addBox(-6, 1.2f, 2, 0.5f, 1.5f, 0.5f);
-        uint32_t sn = m_csgScene.addPrimitiveNode(s, CSG_MAT_RED);
-        uint32_t bn = m_csgScene.addPrimitiveNode(b, CSG_MAT_RED);
-        uint32_t root = m_csgScene.addSubtract(sn, bn, CSG_MAT_RED);
+        uint32_t sn = m_csgScene.addPrimitiveNode(s, MAT_RED);
+        uint32_t bn = m_csgScene.addPrimitiveNode(b, MAT_RED);
+        uint32_t root = m_csgScene.addSubtract(sn, bn, MAT_RED);
         m_csgScene.addRoot(root);
     }
 
@@ -664,9 +734,9 @@ void RayRenderer::buildCSGScene() {
     {
         uint32_t b = m_csgScene.addBox(-2, 1, 2, 1.0f, 1.0f, 1.0f);
         uint32_t s = m_csgScene.addSphere(-2, 1, 2, 1.15f);
-        uint32_t bn = m_csgScene.addPrimitiveNode(b, CSG_MAT_GREEN);
-        uint32_t sn = m_csgScene.addPrimitiveNode(s, CSG_MAT_GREEN);
-        uint32_t root = m_csgScene.addSubtract(bn, sn, CSG_MAT_GREEN);
+        uint32_t bn = m_csgScene.addPrimitiveNode(b, MAT_GREEN);
+        uint32_t sn = m_csgScene.addPrimitiveNode(s, MAT_GREEN);
+        uint32_t root = m_csgScene.addSubtract(bn, sn, MAT_GREEN);
         m_csgScene.addRoot(root);
     }
 
@@ -674,9 +744,9 @@ void RayRenderer::buildCSGScene() {
     {
         uint32_t outer = m_csgScene.addCylinder(2, 0, 2, 1.0f, 2.0f);
         uint32_t inner = m_csgScene.addCylinder(2, 0, 2, 0.6f, 2.5f);
-        uint32_t on = m_csgScene.addPrimitiveNode(outer, CSG_MAT_BLUE);
-        uint32_t in = m_csgScene.addPrimitiveNode(inner, CSG_MAT_BLUE);
-        uint32_t root = m_csgScene.addSubtract(on, in, CSG_MAT_BLUE);
+        uint32_t on = m_csgScene.addPrimitiveNode(outer, MAT_BLUE);
+        uint32_t in = m_csgScene.addPrimitiveNode(inner, MAT_BLUE);
+        uint32_t root = m_csgScene.addSubtract(on, in, MAT_BLUE);
         m_csgScene.addRoot(root);
     }
 
@@ -686,13 +756,13 @@ void RayRenderer::buildCSGScene() {
         uint32_t bx = m_csgScene.addBox(6, 1.2f, 2, 1.5f, 0.4f, 0.4f);
         uint32_t by = m_csgScene.addBox(6, 1.2f, 2, 0.4f, 1.5f, 0.4f);
         uint32_t bz = m_csgScene.addBox(6, 1.2f, 2, 0.4f, 0.4f, 1.5f);
-        uint32_t sn = m_csgScene.addPrimitiveNode(s, CSG_MAT_GOLD);
-        uint32_t bxn = m_csgScene.addPrimitiveNode(bx, CSG_MAT_GOLD);
-        uint32_t byn = m_csgScene.addPrimitiveNode(by, CSG_MAT_GOLD);
-        uint32_t bzn = m_csgScene.addPrimitiveNode(bz, CSG_MAT_GOLD);
-        uint32_t sub1 = m_csgScene.addSubtract(sn, bxn, CSG_MAT_GOLD);
-        uint32_t sub2 = m_csgScene.addSubtract(sub1, byn, CSG_MAT_GOLD);
-        uint32_t root = m_csgScene.addSubtract(sub2, bzn, CSG_MAT_GOLD);
+        uint32_t sn = m_csgScene.addPrimitiveNode(s, MAT_GOLD);
+        uint32_t bxn = m_csgScene.addPrimitiveNode(bx, MAT_GOLD);
+        uint32_t byn = m_csgScene.addPrimitiveNode(by, MAT_GOLD);
+        uint32_t bzn = m_csgScene.addPrimitiveNode(bz, MAT_GOLD);
+        uint32_t sub1 = m_csgScene.addSubtract(sn, bxn, MAT_GOLD);
+        uint32_t sub2 = m_csgScene.addSubtract(sub1, byn, MAT_GOLD);
+        uint32_t root = m_csgScene.addSubtract(sub2, bzn, MAT_GOLD);
         m_csgScene.addRoot(root);
     }
 
@@ -704,9 +774,9 @@ void RayRenderer::buildCSGScene() {
     {
         uint32_t s = m_csgScene.addSphere(-6, 1, -2, 1.3f);
         uint32_t b = m_csgScene.addBox(-6, 1, -2, 0.9f, 0.9f, 0.9f);
-        uint32_t sn = m_csgScene.addPrimitiveNode(s, CSG_MAT_SILVER);
-        uint32_t bn = m_csgScene.addPrimitiveNode(b, CSG_MAT_SILVER);
-        uint32_t root = m_csgScene.addIntersect(sn, bn, CSG_MAT_SILVER);
+        uint32_t sn = m_csgScene.addPrimitiveNode(s, MAT_SILVER);
+        uint32_t bn = m_csgScene.addPrimitiveNode(b, MAT_SILVER);
+        uint32_t root = m_csgScene.addIntersect(sn, bn, MAT_SILVER);
         m_csgScene.addRoot(root);
     }
 
@@ -714,9 +784,9 @@ void RayRenderer::buildCSGScene() {
     {
         uint32_t s1 = m_csgScene.addSphere(-2.5f, 1, -2, 1.2f);
         uint32_t s2 = m_csgScene.addSphere(-1.5f, 1, -2, 1.2f);
-        uint32_t sn1 = m_csgScene.addPrimitiveNode(s1, CSG_MAT_GLASS);
-        uint32_t sn2 = m_csgScene.addPrimitiveNode(s2, CSG_MAT_GLASS);
-        uint32_t root = m_csgScene.addIntersect(sn1, sn2, CSG_MAT_GLASS);
+        uint32_t sn1 = m_csgScene.addPrimitiveNode(s1, MAT_GLASS);
+        uint32_t sn2 = m_csgScene.addPrimitiveNode(s2, MAT_GLASS);
+        uint32_t root = m_csgScene.addIntersect(sn1, sn2, MAT_GLASS);
         m_csgScene.addRoot(root);
     }
 
@@ -724,9 +794,9 @@ void RayRenderer::buildCSGScene() {
     {
         uint32_t cyl = m_csgScene.addCylinder(2, -0.5f, -2, 0.8f, 3.0f);
         uint32_t s = m_csgScene.addSphere(2, 1, -2, 1.3f);
-        uint32_t cn = m_csgScene.addPrimitiveNode(cyl, CSG_MAT_BLUE);
-        uint32_t sn = m_csgScene.addPrimitiveNode(s, CSG_MAT_BLUE);
-        uint32_t root = m_csgScene.addIntersect(cn, sn, CSG_MAT_BLUE);
+        uint32_t cn = m_csgScene.addPrimitiveNode(cyl, MAT_BLUE);
+        uint32_t sn = m_csgScene.addPrimitiveNode(s, MAT_BLUE);
+        uint32_t root = m_csgScene.addIntersect(cn, sn, MAT_BLUE);
         m_csgScene.addRoot(root);
     }
 
@@ -735,13 +805,13 @@ void RayRenderer::buildCSGScene() {
         uint32_t box = m_csgScene.addBox(6, 1, -2, 1.5f, 0.8f, 0.8f);
         uint32_t s1 = m_csgScene.addSphere(6 - 0.6f, 1, -2, 1.0f);
         uint32_t s2 = m_csgScene.addSphere(6 + 0.6f, 1, -2, 1.0f);
-        uint32_t boxn = m_csgScene.addPrimitiveNode(box, CSG_MAT_RED);
-        uint32_t sn1 = m_csgScene.addPrimitiveNode(s1, CSG_MAT_RED);
-        uint32_t sn2 = m_csgScene.addPrimitiveNode(s2, CSG_MAT_RED);
+        uint32_t boxn = m_csgScene.addPrimitiveNode(box, MAT_RED);
+        uint32_t sn1 = m_csgScene.addPrimitiveNode(s1, MAT_RED);
+        uint32_t sn2 = m_csgScene.addPrimitiveNode(s2, MAT_RED);
         // Distributive: intersect(box, union(s1,s2)) = union(intersect(box,s1), intersect(box,s2))
-        uint32_t part1 = m_csgScene.addIntersect(boxn, sn1, CSG_MAT_RED);
-        uint32_t part2 = m_csgScene.addIntersect(boxn, sn2, CSG_MAT_RED);
-        uint32_t root = m_csgScene.addUnion(part1, part2, CSG_MAT_RED);
+        uint32_t part1 = m_csgScene.addIntersect(boxn, sn1, MAT_RED);
+        uint32_t part2 = m_csgScene.addIntersect(boxn, sn2, MAT_RED);
+        uint32_t root = m_csgScene.addUnion(part1, part2, MAT_RED);
         m_csgScene.addRoot(root);
     }
 
@@ -753,9 +823,9 @@ void RayRenderer::buildCSGScene() {
     {
         uint32_t s = m_csgScene.addSphere(-6, 1.2f, -6, 0.9f);
         uint32_t b = m_csgScene.addBox(-6, 0.5f, -6, 0.6f, 0.5f, 0.6f);
-        uint32_t sn = m_csgScene.addPrimitiveNode(s, CSG_MAT_GREEN);
-        uint32_t bn = m_csgScene.addPrimitiveNode(b, CSG_MAT_GREEN);
-        uint32_t root = m_csgScene.addUnion(sn, bn, CSG_MAT_GREEN);
+        uint32_t sn = m_csgScene.addPrimitiveNode(s, MAT_GREEN);
+        uint32_t bn = m_csgScene.addPrimitiveNode(b, MAT_GREEN);
+        uint32_t root = m_csgScene.addUnion(sn, bn, MAT_GREEN);
         m_csgScene.addRoot(root);
     }
 
@@ -764,11 +834,11 @@ void RayRenderer::buildCSGScene() {
         uint32_t s1 = m_csgScene.addSphere(-2, 0.6f, -6, 0.6f);
         uint32_t s2 = m_csgScene.addSphere(-2, 1.5f, -6, 0.45f);
         uint32_t s3 = m_csgScene.addSphere(-2, 2.2f, -6, 0.3f);
-        uint32_t sn1 = m_csgScene.addPrimitiveNode(s1, CSG_MAT_SILVER);
-        uint32_t sn2 = m_csgScene.addPrimitiveNode(s2, CSG_MAT_SILVER);
-        uint32_t sn3 = m_csgScene.addPrimitiveNode(s3, CSG_MAT_SILVER);
-        uint32_t u1 = m_csgScene.addUnion(sn1, sn2, CSG_MAT_SILVER);
-        uint32_t root = m_csgScene.addUnion(u1, sn3, CSG_MAT_SILVER);
+        uint32_t sn1 = m_csgScene.addPrimitiveNode(s1, MAT_SILVER);
+        uint32_t sn2 = m_csgScene.addPrimitiveNode(s2, MAT_SILVER);
+        uint32_t sn3 = m_csgScene.addPrimitiveNode(s3, MAT_SILVER);
+        uint32_t u1 = m_csgScene.addUnion(sn1, sn2, MAT_SILVER);
+        uint32_t root = m_csgScene.addUnion(u1, sn3, MAT_SILVER);
         m_csgScene.addRoot(root);
     }
 
@@ -777,11 +847,11 @@ void RayRenderer::buildCSGScene() {
         uint32_t cyl = m_csgScene.addCylinder(2, 0, -6, 0.5f, 2.0f);
         uint32_t s1 = m_csgScene.addSphere(2, 0, -6, 0.5f);
         uint32_t s2 = m_csgScene.addSphere(2, 2, -6, 0.5f);
-        uint32_t cn = m_csgScene.addPrimitiveNode(cyl, CSG_MAT_GOLD);
-        uint32_t sn1 = m_csgScene.addPrimitiveNode(s1, CSG_MAT_GOLD);
-        uint32_t sn2 = m_csgScene.addPrimitiveNode(s2, CSG_MAT_GOLD);
-        uint32_t u1 = m_csgScene.addUnion(cn, sn1, CSG_MAT_GOLD);
-        uint32_t root = m_csgScene.addUnion(u1, sn2, CSG_MAT_GOLD);
+        uint32_t cn = m_csgScene.addPrimitiveNode(cyl, MAT_GOLD);
+        uint32_t sn1 = m_csgScene.addPrimitiveNode(s1, MAT_GOLD);
+        uint32_t sn2 = m_csgScene.addPrimitiveNode(s2, MAT_GOLD);
+        uint32_t u1 = m_csgScene.addUnion(cn, sn1, MAT_GOLD);
+        uint32_t root = m_csgScene.addUnion(u1, sn2, MAT_GOLD);
         m_csgScene.addRoot(root);
     }
 
@@ -790,11 +860,11 @@ void RayRenderer::buildCSGScene() {
         uint32_t sph = m_csgScene.addSphere(6, 1, -6, 1.0f);
         uint32_t cyl = m_csgScene.addCylinder(6, 0, -6, 0.4f, 2.0f);
         uint32_t box = m_csgScene.addBox(6.5f, 1, -6, 0.8f, 1.5f, 0.3f);
-        uint32_t sphn = m_csgScene.addPrimitiveNode(sph, CSG_MAT_BLUE);
-        uint32_t cyln = m_csgScene.addPrimitiveNode(cyl, CSG_MAT_BLUE);
-        uint32_t boxn = m_csgScene.addPrimitiveNode(box, CSG_MAT_BLUE);
-        uint32_t combo = m_csgScene.addUnion(sphn, cyln, CSG_MAT_BLUE);
-        uint32_t root = m_csgScene.addSubtract(combo, boxn, CSG_MAT_BLUE);
+        uint32_t sphn = m_csgScene.addPrimitiveNode(sph, MAT_BLUE);
+        uint32_t cyln = m_csgScene.addPrimitiveNode(cyl, MAT_BLUE);
+        uint32_t boxn = m_csgScene.addPrimitiveNode(box, MAT_BLUE);
+        uint32_t combo = m_csgScene.addUnion(sphn, cyln, MAT_BLUE);
+        uint32_t root = m_csgScene.addSubtract(combo, boxn, MAT_BLUE);
         m_csgScene.addRoot(root);
     }
 
