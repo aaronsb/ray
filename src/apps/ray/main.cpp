@@ -44,6 +44,11 @@ int main(int argc, char* argv[]) {
         "file");
     parser.addOption(sceneOption);
 
+    QCommandLineOption debugOption(
+        QStringList() << "d" << "debug",
+        "Enable Vulkan validation layers (verbose, for debugging).");
+    parser.addOption(debugOption);
+
     parser.process(app);
 
     // No arguments = show help
@@ -56,7 +61,11 @@ int main(int argc, char* argv[]) {
 
     // Vulkan setup
     QVulkanInstance inst;
-    inst.setLayers({"VK_LAYER_KHRONOS_validation"});
+    inst.setApiVersion(QVersionNumber(1, 2));  // Match shader target
+    if (parser.isSet(debugOption)) {
+        inst.setLayers({"VK_LAYER_KHRONOS_validation"});
+        printf("Vulkan validation layers enabled\n");
+    }
 
     if (!inst.create()) {
         qFatal("Failed to create Vulkan instance: %d", inst.errorCode());
