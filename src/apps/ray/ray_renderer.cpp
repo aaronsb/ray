@@ -18,6 +18,14 @@ RayRenderer::RayRenderer(QVulkanWindow* window,
     m_patchGroup.build(patches);
 }
 
+// Material IDs for CSG (matches shader)
+#define CSG_MAT_RED     0
+#define CSG_MAT_GREEN   1
+#define CSG_MAT_BLUE    2
+#define CSG_MAT_GOLD    3
+#define CSG_MAT_SILVER  4
+#define CSG_MAT_GLASS   5
+
 void RayRenderer::initResources() {
     m_devFuncs = m_window->vulkanInstance()->deviceFunctions(m_window->device());
     m_frameTimer.start();
@@ -30,6 +38,9 @@ void RayRenderer::initResources() {
         {-10.0f, 0.0f, 0.0f, 0.5f, 0.0f, PI * 0.5f, 0.0f, 1},  // Polished silver
         { 10.0f, 0.0f, 0.0f, 0.5f, 0.0f, -PI * 0.5f, 0.0f, 4}, // Clear glass
     };
+
+    // Build CSG scene (matches the hardcoded scene in ray.comp)
+    buildCSGScene();
 
     createPatchBuffers();
     createComputePipeline();
@@ -125,6 +136,32 @@ void RayRenderer::releaseResources() {
     if (m_instanceBufferMemory) {
         m_devFuncs->vkFreeMemory(dev, m_instanceBufferMemory, nullptr);
         m_instanceBufferMemory = VK_NULL_HANDLE;
+    }
+
+    // CSG buffers
+    if (m_csgPrimitiveBuffer) {
+        m_devFuncs->vkDestroyBuffer(dev, m_csgPrimitiveBuffer, nullptr);
+        m_csgPrimitiveBuffer = VK_NULL_HANDLE;
+    }
+    if (m_csgPrimitiveBufferMemory) {
+        m_devFuncs->vkFreeMemory(dev, m_csgPrimitiveBufferMemory, nullptr);
+        m_csgPrimitiveBufferMemory = VK_NULL_HANDLE;
+    }
+    if (m_csgNodeBuffer) {
+        m_devFuncs->vkDestroyBuffer(dev, m_csgNodeBuffer, nullptr);
+        m_csgNodeBuffer = VK_NULL_HANDLE;
+    }
+    if (m_csgNodeBufferMemory) {
+        m_devFuncs->vkFreeMemory(dev, m_csgNodeBufferMemory, nullptr);
+        m_csgNodeBufferMemory = VK_NULL_HANDLE;
+    }
+    if (m_csgRootBuffer) {
+        m_devFuncs->vkDestroyBuffer(dev, m_csgRootBuffer, nullptr);
+        m_csgRootBuffer = VK_NULL_HANDLE;
+    }
+    if (m_csgRootBufferMemory) {
+        m_devFuncs->vkFreeMemory(dev, m_csgRootBufferMemory, nullptr);
+        m_csgRootBufferMemory = VK_NULL_HANDLE;
     }
 }
 
@@ -242,15 +279,18 @@ void RayRenderer::createPatchBuffers() {
     printf("Uploaded %u patches + %u BVH nodes + %zu instances (%.1f KB total)\n",
            m_patchGroup.subPatchCount(), m_patchGroup.bvhNodeCount(), m_instances.size(),
            (patchDataSize + bvhSize + indexSize + instanceSize) / 1024.0f);
+
+    // Create CSG buffers
+    createCSGBuffers();
 }
 
 void RayRenderer::createDescriptorSet() {
     VkDevice dev = m_window->device();
 
-    // Create descriptor pool (2 images + 4 buffers)
+    // Create descriptor pool (2 images + 7 buffers)
     std::array<VkDescriptorPoolSize, 2> poolSizes{};
     poolSizes[0] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2};  // output + accumulation
-    poolSizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4};  // patches, BVH, indices, instances
+    poolSizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 7};  // patches, BVH, indices, instances, CSG prims/nodes/roots
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -301,7 +341,23 @@ void RayRenderer::createDescriptorSet() {
     instanceBufferInfo.offset = 0;
     instanceBufferInfo.range = VK_WHOLE_SIZE;
 
-    std::array<VkWriteDescriptorSet, 6> writes{};
+    // CSG buffer infos
+    VkDescriptorBufferInfo csgPrimBufferInfo{};
+    csgPrimBufferInfo.buffer = m_csgPrimitiveBuffer;
+    csgPrimBufferInfo.offset = 0;
+    csgPrimBufferInfo.range = VK_WHOLE_SIZE;
+
+    VkDescriptorBufferInfo csgNodeBufferInfo{};
+    csgNodeBufferInfo.buffer = m_csgNodeBuffer;
+    csgNodeBufferInfo.offset = 0;
+    csgNodeBufferInfo.range = VK_WHOLE_SIZE;
+
+    VkDescriptorBufferInfo csgRootBufferInfo{};
+    csgRootBufferInfo.buffer = m_csgRootBuffer;
+    csgRootBufferInfo.offset = 0;
+    csgRootBufferInfo.range = VK_WHOLE_SIZE;
+
+    std::array<VkWriteDescriptorSet, 9> writes{};
 
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[0].dstSet = m_descriptorSet;
@@ -345,14 +401,36 @@ void RayRenderer::createDescriptorSet() {
     writes[5].descriptorCount = 1;
     writes[5].pImageInfo = &accumImageInfo;
 
+    // CSG buffers (bindings 6, 7, 8)
+    writes[6].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[6].dstSet = m_descriptorSet;
+    writes[6].dstBinding = 6;
+    writes[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[6].descriptorCount = 1;
+    writes[6].pBufferInfo = &csgPrimBufferInfo;
+
+    writes[7].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[7].dstSet = m_descriptorSet;
+    writes[7].dstBinding = 7;
+    writes[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[7].descriptorCount = 1;
+    writes[7].pBufferInfo = &csgNodeBufferInfo;
+
+    writes[8].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[8].dstSet = m_descriptorSet;
+    writes[8].dstBinding = 8;
+    writes[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[8].descriptorCount = 1;
+    writes[8].pBufferInfo = &csgRootBufferInfo;
+
     m_devFuncs->vkUpdateDescriptorSets(dev, writes.size(), writes.data(), 0, nullptr);
 }
 
 void RayRenderer::createComputePipeline() {
     VkDevice dev = m_window->device();
 
-    // Descriptor set layout (6 bindings: output image, 4 buffers, accum image)
-    std::array<VkDescriptorSetLayoutBinding, 6> bindings{};
+    // Descriptor set layout (9 bindings: output image, 4 buffers, accum image, 3 CSG buffers)
+    std::array<VkDescriptorSetLayoutBinding, 9> bindings{};
 
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -383,6 +461,22 @@ void RayRenderer::createComputePipeline() {
     bindings[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     bindings[5].descriptorCount = 1;
     bindings[5].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    // CSG buffers (bindings 6, 7, 8)
+    bindings[6].binding = 6;
+    bindings[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[6].descriptorCount = 1;
+    bindings[6].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    bindings[7].binding = 7;
+    bindings[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[7].descriptorCount = 1;
+    bindings[7].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    bindings[8].binding = 8;
+    bindings[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[8].descriptorCount = 1;
+    bindings[8].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -463,6 +557,9 @@ void RayRenderer::recordComputeCommands(VkCommandBuffer cmdBuf) {
     pc.camTargetY = m_camera.targetY;
     pc.camTargetZ = m_camera.targetZ;
     pc.numInstances = static_cast<uint32_t>(m_instances.size());
+    pc.numCSGPrimitives = m_csgScene.primitiveCount();
+    pc.numCSGNodes = m_csgScene.nodeCount();
+    pc.numCSGRoots = m_csgScene.rootCount();
 
     m_devFuncs->vkCmdPushConstants(cmdBuf, m_pipelineLayout,
         VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RayPushConstants), &pc);
@@ -534,6 +631,225 @@ void RayRenderer::recordComputeCommands(VkCommandBuffer cmdBuf) {
     m_devFuncs->vkCmdPipelineBarrier(cmdBuf,
         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         0, 0, nullptr, 0, nullptr, 1, &barrier);
+}
+
+void RayRenderer::buildCSGScene() {
+    // Build CSG scene matching the hardcoded scene in ray.comp
+    // Material IDs: RED=0, GREEN=1, BLUE=2, GOLD=3, SILVER=4, GLASS=5
+
+    // ========================================
+    // Row 1 (z = 6): Plain primitives
+    // ========================================
+    m_csgScene.addSphereShape(-8, 1, 6, 1.0f, CSG_MAT_RED);
+    m_csgScene.addBoxShape(-4, 1, 6, 0.8f, 0.8f, 0.8f, CSG_MAT_GREEN);
+    m_csgScene.addCylinderShape(0, 0, 6, 0.7f, 2.0f, CSG_MAT_BLUE);
+    m_csgScene.addConeShape(4, 0, 6, 1.0f, 2.0f, CSG_MAT_GOLD);
+    m_csgScene.addTorusShape(8, 1, 6, 0.8f, 0.3f, CSG_MAT_SILVER);
+
+    // ========================================
+    // Row 2 (z = 2): CSG Subtract operations
+    // ========================================
+
+    // Sphere minus box (classic hole punch)
+    {
+        uint32_t s = m_csgScene.addSphere(-6, 1.2f, 2, 1.2f);
+        uint32_t b = m_csgScene.addBox(-6, 1.2f, 2, 0.5f, 1.5f, 0.5f);
+        uint32_t sn = m_csgScene.addPrimitiveNode(s, CSG_MAT_RED);
+        uint32_t bn = m_csgScene.addPrimitiveNode(b, CSG_MAT_RED);
+        uint32_t root = m_csgScene.addSubtract(sn, bn, CSG_MAT_RED);
+        m_csgScene.addRoot(root);
+    }
+
+    // Box minus sphere (rounded cavity)
+    {
+        uint32_t b = m_csgScene.addBox(-2, 1, 2, 1.0f, 1.0f, 1.0f);
+        uint32_t s = m_csgScene.addSphere(-2, 1, 2, 1.15f);
+        uint32_t bn = m_csgScene.addPrimitiveNode(b, CSG_MAT_GREEN);
+        uint32_t sn = m_csgScene.addPrimitiveNode(s, CSG_MAT_GREEN);
+        uint32_t root = m_csgScene.addSubtract(bn, sn, CSG_MAT_GREEN);
+        m_csgScene.addRoot(root);
+    }
+
+    // Cylinder minus cylinder (tube)
+    {
+        uint32_t outer = m_csgScene.addCylinder(2, 0, 2, 1.0f, 2.0f);
+        uint32_t inner = m_csgScene.addCylinder(2, 0, 2, 0.6f, 2.5f);
+        uint32_t on = m_csgScene.addPrimitiveNode(outer, CSG_MAT_BLUE);
+        uint32_t in = m_csgScene.addPrimitiveNode(inner, CSG_MAT_BLUE);
+        uint32_t root = m_csgScene.addSubtract(on, in, CSG_MAT_BLUE);
+        m_csgScene.addRoot(root);
+    }
+
+    // Sphere minus three boxes (dice-like cuts)
+    {
+        uint32_t s = m_csgScene.addSphere(6, 1.2f, 2, 1.2f);
+        uint32_t bx = m_csgScene.addBox(6, 1.2f, 2, 1.5f, 0.4f, 0.4f);
+        uint32_t by = m_csgScene.addBox(6, 1.2f, 2, 0.4f, 1.5f, 0.4f);
+        uint32_t bz = m_csgScene.addBox(6, 1.2f, 2, 0.4f, 0.4f, 1.5f);
+        uint32_t sn = m_csgScene.addPrimitiveNode(s, CSG_MAT_GOLD);
+        uint32_t bxn = m_csgScene.addPrimitiveNode(bx, CSG_MAT_GOLD);
+        uint32_t byn = m_csgScene.addPrimitiveNode(by, CSG_MAT_GOLD);
+        uint32_t bzn = m_csgScene.addPrimitiveNode(bz, CSG_MAT_GOLD);
+        uint32_t sub1 = m_csgScene.addSubtract(sn, bxn, CSG_MAT_GOLD);
+        uint32_t sub2 = m_csgScene.addSubtract(sub1, byn, CSG_MAT_GOLD);
+        uint32_t root = m_csgScene.addSubtract(sub2, bzn, CSG_MAT_GOLD);
+        m_csgScene.addRoot(root);
+    }
+
+    // ========================================
+    // Row 3 (z = -2): CSG Intersect operations
+    // ========================================
+
+    // Sphere intersect box (rounded box)
+    {
+        uint32_t s = m_csgScene.addSphere(-6, 1, -2, 1.3f);
+        uint32_t b = m_csgScene.addBox(-6, 1, -2, 0.9f, 0.9f, 0.9f);
+        uint32_t sn = m_csgScene.addPrimitiveNode(s, CSG_MAT_SILVER);
+        uint32_t bn = m_csgScene.addPrimitiveNode(b, CSG_MAT_SILVER);
+        uint32_t root = m_csgScene.addIntersect(sn, bn, CSG_MAT_SILVER);
+        m_csgScene.addRoot(root);
+    }
+
+    // Two spheres intersect (lens shape)
+    {
+        uint32_t s1 = m_csgScene.addSphere(-2.5f, 1, -2, 1.2f);
+        uint32_t s2 = m_csgScene.addSphere(-1.5f, 1, -2, 1.2f);
+        uint32_t sn1 = m_csgScene.addPrimitiveNode(s1, CSG_MAT_GLASS);
+        uint32_t sn2 = m_csgScene.addPrimitiveNode(s2, CSG_MAT_GLASS);
+        uint32_t root = m_csgScene.addIntersect(sn1, sn2, CSG_MAT_GLASS);
+        m_csgScene.addRoot(root);
+    }
+
+    // Cylinder intersect sphere (capsule segment)
+    {
+        uint32_t cyl = m_csgScene.addCylinder(2, -0.5f, -2, 0.8f, 3.0f);
+        uint32_t s = m_csgScene.addSphere(2, 1, -2, 1.3f);
+        uint32_t cn = m_csgScene.addPrimitiveNode(cyl, CSG_MAT_BLUE);
+        uint32_t sn = m_csgScene.addPrimitiveNode(s, CSG_MAT_BLUE);
+        uint32_t root = m_csgScene.addIntersect(cn, sn, CSG_MAT_BLUE);
+        m_csgScene.addRoot(root);
+    }
+
+    // Box intersect two spheres (peanut in box) - uses distributive property
+    {
+        uint32_t box = m_csgScene.addBox(6, 1, -2, 1.5f, 0.8f, 0.8f);
+        uint32_t s1 = m_csgScene.addSphere(6 - 0.6f, 1, -2, 1.0f);
+        uint32_t s2 = m_csgScene.addSphere(6 + 0.6f, 1, -2, 1.0f);
+        uint32_t boxn = m_csgScene.addPrimitiveNode(box, CSG_MAT_RED);
+        uint32_t sn1 = m_csgScene.addPrimitiveNode(s1, CSG_MAT_RED);
+        uint32_t sn2 = m_csgScene.addPrimitiveNode(s2, CSG_MAT_RED);
+        // Distributive: intersect(box, union(s1,s2)) = union(intersect(box,s1), intersect(box,s2))
+        uint32_t part1 = m_csgScene.addIntersect(boxn, sn1, CSG_MAT_RED);
+        uint32_t part2 = m_csgScene.addIntersect(boxn, sn2, CSG_MAT_RED);
+        uint32_t root = m_csgScene.addUnion(part1, part2, CSG_MAT_RED);
+        m_csgScene.addRoot(root);
+    }
+
+    // ========================================
+    // Row 4 (z = -6): CSG Union + complex
+    // ========================================
+
+    // Union of sphere and box
+    {
+        uint32_t s = m_csgScene.addSphere(-6, 1.2f, -6, 0.9f);
+        uint32_t b = m_csgScene.addBox(-6, 0.5f, -6, 0.6f, 0.5f, 0.6f);
+        uint32_t sn = m_csgScene.addPrimitiveNode(s, CSG_MAT_GREEN);
+        uint32_t bn = m_csgScene.addPrimitiveNode(b, CSG_MAT_GREEN);
+        uint32_t root = m_csgScene.addUnion(sn, bn, CSG_MAT_GREEN);
+        m_csgScene.addRoot(root);
+    }
+
+    // Snowman (three spheres)
+    {
+        uint32_t s1 = m_csgScene.addSphere(-2, 0.6f, -6, 0.6f);
+        uint32_t s2 = m_csgScene.addSphere(-2, 1.5f, -6, 0.45f);
+        uint32_t s3 = m_csgScene.addSphere(-2, 2.2f, -6, 0.3f);
+        uint32_t sn1 = m_csgScene.addPrimitiveNode(s1, CSG_MAT_SILVER);
+        uint32_t sn2 = m_csgScene.addPrimitiveNode(s2, CSG_MAT_SILVER);
+        uint32_t sn3 = m_csgScene.addPrimitiveNode(s3, CSG_MAT_SILVER);
+        uint32_t u1 = m_csgScene.addUnion(sn1, sn2, CSG_MAT_SILVER);
+        uint32_t root = m_csgScene.addUnion(u1, sn3, CSG_MAT_SILVER);
+        m_csgScene.addRoot(root);
+    }
+
+    // Cylinder with spherical ends (capsule via CSG)
+    {
+        uint32_t cyl = m_csgScene.addCylinder(2, 0, -6, 0.5f, 2.0f);
+        uint32_t s1 = m_csgScene.addSphere(2, 0, -6, 0.5f);
+        uint32_t s2 = m_csgScene.addSphere(2, 2, -6, 0.5f);
+        uint32_t cn = m_csgScene.addPrimitiveNode(cyl, CSG_MAT_GOLD);
+        uint32_t sn1 = m_csgScene.addPrimitiveNode(s1, CSG_MAT_GOLD);
+        uint32_t sn2 = m_csgScene.addPrimitiveNode(s2, CSG_MAT_GOLD);
+        uint32_t u1 = m_csgScene.addUnion(cn, sn1, CSG_MAT_GOLD);
+        uint32_t root = m_csgScene.addUnion(u1, sn2, CSG_MAT_GOLD);
+        m_csgScene.addRoot(root);
+    }
+
+    // Complex: (sphere union cylinder) minus box
+    {
+        uint32_t sph = m_csgScene.addSphere(6, 1, -6, 1.0f);
+        uint32_t cyl = m_csgScene.addCylinder(6, 0, -6, 0.4f, 2.0f);
+        uint32_t box = m_csgScene.addBox(6.5f, 1, -6, 0.8f, 1.5f, 0.3f);
+        uint32_t sphn = m_csgScene.addPrimitiveNode(sph, CSG_MAT_BLUE);
+        uint32_t cyln = m_csgScene.addPrimitiveNode(cyl, CSG_MAT_BLUE);
+        uint32_t boxn = m_csgScene.addPrimitiveNode(box, CSG_MAT_BLUE);
+        uint32_t combo = m_csgScene.addUnion(sphn, cyln, CSG_MAT_BLUE);
+        uint32_t root = m_csgScene.addSubtract(combo, boxn, CSG_MAT_BLUE);
+        m_csgScene.addRoot(root);
+    }
+
+    printf("CSG scene: %u primitives, %u nodes, %u roots\n",
+           m_csgScene.primitiveCount(), m_csgScene.nodeCount(), m_csgScene.rootCount());
+}
+
+void RayRenderer::createCSGBuffers() {
+    VkDevice dev = m_window->device();
+
+    const auto& prims = m_csgScene.primitives();
+    const auto& nodes = m_csgScene.nodes();
+    const auto& roots = m_csgScene.roots();
+
+    // Minimum size to avoid empty buffer issues
+    size_t primSize = std::max(prims.size() * sizeof(CSGPrimitive), size_t(32));
+    size_t nodeSize = std::max(nodes.size() * sizeof(CSGNode), size_t(16));
+    size_t rootSize = std::max(roots.size() * sizeof(uint32_t), size_t(4));
+
+    // Create buffers
+    createBuffer(primSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 m_csgPrimitiveBuffer, m_csgPrimitiveBufferMemory);
+
+    createBuffer(nodeSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 m_csgNodeBuffer, m_csgNodeBufferMemory);
+
+    createBuffer(rootSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 m_csgRootBuffer, m_csgRootBufferMemory);
+
+    // Upload data
+    void* data;
+
+    if (!prims.empty()) {
+        m_devFuncs->vkMapMemory(dev, m_csgPrimitiveBufferMemory, 0, primSize, 0, &data);
+        memcpy(data, prims.data(), prims.size() * sizeof(CSGPrimitive));
+        m_devFuncs->vkUnmapMemory(dev, m_csgPrimitiveBufferMemory);
+    }
+
+    if (!nodes.empty()) {
+        m_devFuncs->vkMapMemory(dev, m_csgNodeBufferMemory, 0, nodeSize, 0, &data);
+        memcpy(data, nodes.data(), nodes.size() * sizeof(CSGNode));
+        m_devFuncs->vkUnmapMemory(dev, m_csgNodeBufferMemory);
+    }
+
+    if (!roots.empty()) {
+        m_devFuncs->vkMapMemory(dev, m_csgRootBufferMemory, 0, rootSize, 0, &data);
+        memcpy(data, roots.data(), roots.size() * sizeof(uint32_t));
+        m_devFuncs->vkUnmapMemory(dev, m_csgRootBufferMemory);
+    }
+
+    printf("Uploaded CSG: %zu primitives (%.1f KB), %zu nodes, %zu roots\n",
+           prims.size(), primSize / 1024.0f, nodes.size(), roots.size());
 }
 
 uint32_t RayRenderer::findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {

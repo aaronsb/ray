@@ -8,12 +8,16 @@
 #include <QString>
 #include <vector>
 #include "../../parametric/bezier/patch_group.h"
+#include "../../parametric/csg/csg.h"
 
 using parametric::BezierInstance;
 using parametric::BezierPatchGroup;
 using parametric::Patch;
 using parametric::SubPatch;
 using parametric::BVHNode;
+using parametric::CSGScene;
+using parametric::CSGPrimitive;
+using parametric::CSGNode;
 
 // Push constants matching ray.comp
 struct RayPushConstants {
@@ -25,6 +29,10 @@ struct RayPushConstants {
     uint32_t frameIndex;
     float camTargetX, camTargetY, camTargetZ;
     uint32_t numInstances;
+    uint32_t numCSGPrimitives;
+    uint32_t numCSGNodes;
+    uint32_t numCSGRoots;
+    uint32_t _pad;
 };
 
 // Simple orbit camera
@@ -101,6 +109,9 @@ private:
     std::vector<BezierInstance> m_instances;
     RayCamera m_camera;
 
+    // CSG scene data
+    CSGScene m_csgScene;
+
     // Vulkan resources
     VkPipeline m_computePipeline = VK_NULL_HANDLE;
     VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
@@ -134,6 +145,14 @@ private:
     VkBuffer m_instanceBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_instanceBufferMemory = VK_NULL_HANDLE;
 
+    // CSG buffers
+    VkBuffer m_csgPrimitiveBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_csgPrimitiveBufferMemory = VK_NULL_HANDLE;
+    VkBuffer m_csgNodeBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_csgNodeBufferMemory = VK_NULL_HANDLE;
+    VkBuffer m_csgRootBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_csgRootBufferMemory = VK_NULL_HANDLE;
+
     // Frame tracking
     uint32_t m_frameIndex = 0;
     bool m_needsImageTransition = true;
@@ -145,6 +164,8 @@ private:
     VkShaderModule createShaderModule(const QString& path);
     void createStorageImage();
     void createPatchBuffers();
+    void createCSGBuffers();
+    void buildCSGScene();
     void createDescriptorSet();
     void createComputePipeline();
     void recordComputeCommands(VkCommandBuffer cmdBuf);
