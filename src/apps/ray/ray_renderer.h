@@ -5,6 +5,7 @@
 
 #include <QVulkanWindow>
 #include <QElapsedTimer>
+#include <QString>
 #include <vector>
 #include "../../parametric/bezier/patch_group.h"
 
@@ -28,12 +29,12 @@ struct RayPushConstants {
 
 // Simple orbit camera
 struct RayCamera {
-    float distance = 12.0f;
-    float azimuth = 0.5f;
-    float elevation = 0.4f;
+    float distance = 18.0f;
+    float azimuth = 0.3f;
+    float elevation = 0.5f;
     float targetX = 0.0f;
-    float targetY = 0.5f;
-    float targetZ = 1.5f;
+    float targetY = 1.0f;
+    float targetZ = 0.0f;
 
     void rotate(float dAzimuth, float dElevation) {
         azimuth += dAzimuth;
@@ -44,6 +45,23 @@ struct RayCamera {
     void zoom(float delta) {
         distance *= (1.0f - delta * 0.1f);
         distance = std::clamp(distance, 1.0f, 50.0f);
+    }
+
+    // Move camera origin (target point) - dolly (X) and truck (Y)
+    void pan(float dx, float dy) {
+        // Forward vector (from camera to target, in XZ plane)
+        float forwardX = -std::sin(azimuth);
+        float forwardZ = -std::cos(azimuth);
+
+        // Right vector (perpendicular to forward, in XZ plane)
+        float rightX = std::cos(azimuth);
+        float rightZ = -std::sin(azimuth);
+
+        // dx: move along forward (towards/away from camera view direction)
+        // dy: move along right (perpendicular to view)
+        float speed = distance * 0.01f;  // Scale with distance for consistent feel
+        targetX += (forwardX * dx + rightX * dy) * speed;
+        targetZ += (forwardZ * dx + rightZ * dy) * speed;
     }
 
     void getPosition(float& x, float& y, float& z) const {
@@ -66,10 +84,13 @@ public:
 
     RayCamera& camera() { return m_camera; }
     float fps() const { return m_fps; }
+    uint32_t frameIndex() const { return m_frameIndex; }
     void markCameraMotion() {
         m_frameIndex = 0;
         m_window->requestUpdate();
     }
+
+    bool saveScreenshot(const QString& filename);
 
 private:
     QVulkanWindow* m_window;
@@ -151,6 +172,16 @@ public:
 
     RayRenderer* renderer() const { return m_renderer; }
 
+    // Screenshot on start: takes screenshot after N frames then optionally exits
+    void setScreenshotOnStart(const QString& filename, uint32_t waitFrames = 30, bool exitAfter = true) {
+        m_screenshotFilename = filename;
+        m_screenshotWaitFrames = waitFrames;
+        m_screenshotExitAfter = exitAfter;
+    }
+
+public slots:
+    void checkScreenshotReady();
+
 protected:
     void mousePressEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
@@ -163,4 +194,10 @@ private:
     RayRenderer* m_renderer = nullptr;
     QPointF m_lastMousePos;
     bool m_leftMousePressed = false;
+    bool m_rightMousePressed = false;
+
+    // Screenshot on start
+    QString m_screenshotFilename;
+    uint32_t m_screenshotWaitFrames = 0;
+    bool m_screenshotExitAfter = false;
 };

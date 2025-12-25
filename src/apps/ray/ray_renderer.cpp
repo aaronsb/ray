@@ -1,10 +1,14 @@
 #include "ray_renderer.h"
 #include <QFile>
+#include <QFileInfo>
 #include <QVulkanFunctions>
 #include <QMouseEvent>
 #include <QWheelEvent>
 #include <QKeyEvent>
 #include <QCoreApplication>
+#include <QImage>
+#include <QDateTime>
+#include <QTimer>
 #include <cstring>
 
 RayRenderer::RayRenderer(QVulkanWindow* window,
@@ -20,17 +24,11 @@ void RayRenderer::initResources() {
 
     const float PI = 3.14159265f;
 
-    // Create teapot instances - each showcases a different material effect
+    // Teapot instances - reduced to showcase alongside CSG scene
     // Format: {posX, posY, posZ, scale, rotX, rotY, rotZ, materialId}
     m_instances = {
-        // Front row
-        {-4.0f, 0.0f, 4.0f, 0.6f, 0.0f, PI * 0.3f, 0.0f, 0},   // 0: Diffuse ceramic
-        { 0.0f, 0.0f, 4.0f, 0.6f, 0.0f, 0.0f, 0.0f, 1},        // 1: Polished mirror metal
-        { 4.0f, 0.0f, 4.0f, 0.6f, 0.0f, -PI * 0.3f, 0.0f, 2},  // 2: Rough metal (sandpaper)
-        // Back row
-        {-4.0f, 0.0f, -2.0f, 0.6f, 0.0f, PI * 0.8f, 0.0f, 3},  // 3: Hammered metal (bump)
-        { 0.0f, 0.0f, -2.0f, 0.6f, 0.0f, PI, 0.0f, 4},         // 4: Clear glass
-        { 4.0f, 0.0f, -2.0f, 0.6f, 0.0f, -PI * 0.8f, 0.0f, 5}, // 5: Colored glass (absorption)
+        {-10.0f, 0.0f, 0.0f, 0.5f, 0.0f, PI * 0.5f, 0.0f, 1},  // Polished silver
+        { 10.0f, 0.0f, 0.0f, 0.5f, 0.0f, -PI * 0.5f, 0.0f, 4}, // Clear glass
     };
 
     createPatchBuffers();
@@ -665,6 +663,115 @@ void RayRenderer::transitionImageLayout(VkCommandBuffer cmdBuf, VkImage image,
         0, 0, nullptr, 0, nullptr, 1, &barrier);
 }
 
+bool RayRenderer::saveScreenshot(const QString& filename) {
+    VkDevice dev = m_window->device();
+    uint32_t width = m_window->swapChainImageSize().width();
+    uint32_t height = m_window->swapChainImageSize().height();
+
+    // Wait for any in-flight rendering to complete
+    m_devFuncs->vkDeviceWaitIdle(dev);
+
+    // Create staging buffer
+    VkDeviceSize bufferSize = width * height * 4;
+    VkBuffer stagingBuffer;
+    VkDeviceMemory stagingMemory;
+    createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 stagingBuffer, stagingMemory);
+
+    // Create a temporary command pool and buffer
+    VkCommandPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolInfo.queueFamilyIndex = m_window->graphicsQueueFamilyIndex();
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+
+    VkCommandPool cmdPool;
+    if (m_devFuncs->vkCreateCommandPool(dev, &poolInfo, nullptr, &cmdPool) != VK_SUCCESS) {
+        qWarning("Failed to create command pool for screenshot");
+        m_devFuncs->vkDestroyBuffer(dev, stagingBuffer, nullptr);
+        m_devFuncs->vkFreeMemory(dev, stagingMemory, nullptr);
+        return false;
+    }
+
+    VkCommandBufferAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocInfo.commandPool = cmdPool;
+    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocInfo.commandBufferCount = 1;
+
+    VkCommandBuffer cmdBuf;
+    if (m_devFuncs->vkAllocateCommandBuffers(dev, &allocInfo, &cmdBuf) != VK_SUCCESS) {
+        qWarning("Failed to allocate command buffer for screenshot");
+        m_devFuncs->vkDestroyCommandPool(dev, cmdPool, nullptr);
+        m_devFuncs->vkDestroyBuffer(dev, stagingBuffer, nullptr);
+        m_devFuncs->vkFreeMemory(dev, stagingMemory, nullptr);
+        return false;
+    }
+
+    // Begin command buffer
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    m_devFuncs->vkBeginCommandBuffer(cmdBuf, &beginInfo);
+
+    // Transition storage image for transfer (it's in GENERAL layout)
+    transitionImageLayout(cmdBuf, m_storageImage,
+                          VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                          VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+    // Copy image to buffer
+    VkBufferImageCopy region{};
+    region.bufferOffset = 0;
+    region.bufferRowLength = 0;
+    region.bufferImageHeight = 0;
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.mipLevel = 0;
+    region.imageSubresource.baseArrayLayer = 0;
+    region.imageSubresource.layerCount = 1;
+    region.imageOffset = {0, 0, 0};
+    region.imageExtent = {width, height, 1};
+
+    m_devFuncs->vkCmdCopyImageToBuffer(cmdBuf, m_storageImage,
+                                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                        stagingBuffer, 1, &region);
+
+    // Transition back to general
+    transitionImageLayout(cmdBuf, m_storageImage,
+                          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
+                          VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+                          VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
+    // End and submit command buffer
+    m_devFuncs->vkEndCommandBuffer(cmdBuf);
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &cmdBuf;
+
+    VkQueue queue = m_window->graphicsQueue();
+    m_devFuncs->vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
+    m_devFuncs->vkQueueWaitIdle(queue);
+
+    // Map and read
+    void* data;
+    m_devFuncs->vkMapMemory(dev, stagingMemory, 0, bufferSize, 0, &data);
+
+    // Create QImage - storage image is RGBA8
+    QImage image(width, height, QImage::Format_RGBA8888);
+    memcpy(image.bits(), data, bufferSize);
+
+    m_devFuncs->vkUnmapMemory(dev, stagingMemory);
+
+    // Cleanup
+    m_devFuncs->vkDestroyCommandPool(dev, cmdPool, nullptr);
+    m_devFuncs->vkDestroyBuffer(dev, stagingBuffer, nullptr);
+    m_devFuncs->vkFreeMemory(dev, stagingMemory, nullptr);
+
+    return image.save(filename);
+}
+
 // RayWindow implementation
 
 QVulkanWindowRenderer* RayWindow::createRenderer() {
@@ -676,12 +783,16 @@ void RayWindow::mousePressEvent(QMouseEvent* event) {
     m_lastMousePos = event->position();
     if (event->button() == Qt::LeftButton) {
         m_leftMousePressed = true;
+    } else if (event->button() == Qt::RightButton) {
+        m_rightMousePressed = true;
     }
 }
 
 void RayWindow::mouseReleaseEvent(QMouseEvent* event) {
     if (event->button() == Qt::LeftButton) {
         m_leftMousePressed = false;
+    } else if (event->button() == Qt::RightButton) {
+        m_rightMousePressed = false;
     }
 }
 
@@ -692,8 +803,15 @@ void RayWindow::mouseMoveEvent(QMouseEvent* event) {
     m_lastMousePos = event->position();
 
     if (m_leftMousePressed) {
+        // Orbit camera around target
         float sensitivity = 0.005f;
         m_renderer->camera().rotate(-delta.x() * sensitivity, -delta.y() * sensitivity);
+        m_renderer->markCameraMotion();
+    } else if (m_rightMousePressed) {
+        // Pan camera origin (dolly/truck)
+        // Mouse forward (up) = move towards target, back (down) = away
+        // Mouse left/right = truck left/right
+        m_renderer->camera().pan(-delta.y(), delta.x());
         m_renderer->markCameraMotion();
     }
 }
@@ -709,5 +827,44 @@ void RayWindow::wheelEvent(QWheelEvent* event) {
 void RayWindow::keyPressEvent(QKeyEvent* event) {
     if (event->key() == Qt::Key_Escape) {
         close();
+    } else if (event->key() == Qt::Key_S && m_renderer) {
+        QString filename = QString("raytrace_%1.png")
+            .arg(QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss"));
+        if (m_renderer->saveScreenshot(filename)) {
+            QString absPath = QFileInfo(filename).absoluteFilePath();
+            printf("Saved screenshot: %s\n", qPrintable(absPath));
+        } else {
+            fprintf(stderr, "Failed to save screenshot\n");
+        }
+    } else if (event->key() == Qt::Key_R && m_renderer) {
+        // Reset accumulation (start fresh)
+        m_renderer->markCameraMotion();
+    }
+}
+
+void RayWindow::checkScreenshotReady() {
+    if (m_screenshotFilename.isEmpty() || !m_renderer) {
+        return;
+    }
+
+    if (m_renderer->frameIndex() >= m_screenshotWaitFrames) {
+        // Take screenshot
+        if (m_renderer->saveScreenshot(m_screenshotFilename)) {
+            QString absPath = QFileInfo(m_screenshotFilename).absoluteFilePath();
+            printf("Saved screenshot: %s\n", qPrintable(absPath));
+        } else {
+            fprintf(stderr, "Failed to save screenshot\n");
+        }
+
+        // Clear to prevent retaking
+        m_screenshotFilename.clear();
+
+        if (m_screenshotExitAfter) {
+            // Close window properly to trigger Vulkan cleanup
+            close();
+        }
+    } else {
+        // Check again after next frame
+        QTimer::singleShot(16, this, &RayWindow::checkScreenshotReady);
     }
 }
