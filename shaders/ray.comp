@@ -756,13 +756,13 @@ void main() {
     ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
     if (pixel.x >= int(pc.width) || pixel.y >= int(pc.height)) return;
 
-    // Initialize RNG - use frame index for temporal variation when accumulating
+    // Initialize RNG - include camera position so noise pattern changes when camera moves
 #if FEATURE_ACCUMULATION
-    initRNGTemporal(pixel, pc.frameIndex);
+    initRNGWithCamera(pixel, pc.frameIndex, pc.camPos);
     // Adaptive iterations: more for first frames, fewer once accumulating
     g_newtonMaxIter = (pc.frameIndex < 4) ? NEWTON_MAX_ITER : 4;
 #else
-    initRNG(pixel);
+    initRNGWithCamera(pixel, 0, pc.camPos);
 #endif
 
     vec2 uv = vec2(pixel) / vec2(pc.width, pc.height);
