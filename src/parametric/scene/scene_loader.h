@@ -32,12 +32,18 @@ struct FloorSettings {
     std::string materialName;  // Material to use (any type)
 };
 
+// Background/universe color for rays that miss everything
+struct BackgroundSettings {
+    float r = 0.0f, g = 0.0f, b = 0.0f;  // Default black
+};
+
 // Complete scene data
 struct SceneData {
     CSGScene csg;
     MaterialLibrary materials;
     LightList lights;
     FloorSettings floor;
+    BackgroundSettings background;
     std::map<std::string, std::vector<Patch>> patchGroups;
     std::vector<PatchInstance> patchInstances;
 
@@ -131,6 +137,8 @@ private:
             processPointLight(expr);
         } else if (cmd == "floor") {
             processFloor(expr);
+        } else if (cmd == "background") {
+            processBackground(expr);
         }
     }
 
@@ -221,6 +229,15 @@ private:
             if (key == "y" && prop.size() >= 2) {
                 floor.y = static_cast<float>(prop[1].asNumber());
             }
+        }
+    }
+
+    // (background r g b) - universe color for rays that miss everything
+    void processBackground(const SExp& expr) {
+        if (expr.size() >= 4) {
+            data_.background.r = static_cast<float>(expr[1].asNumber());
+            data_.background.g = static_cast<float>(expr[2].asNumber());
+            data_.background.b = static_cast<float>(expr[3].asNumber());
         }
     }
 

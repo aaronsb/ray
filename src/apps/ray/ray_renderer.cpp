@@ -38,6 +38,7 @@ void RayRenderer::initResources() {
             m_materials = std::move(sceneData.materials);
             m_lights = std::move(sceneData.lights);
             m_floor = sceneData.floor;
+            m_background = sceneData.background;
 
             // Build patches from scene data
             auto patches = sceneData.allPatches();
@@ -741,6 +742,9 @@ void RayRenderer::recordComputeCommands(VkCommandBuffer cmdBuf) {
     pc.floorY = m_floor.y;
     pc.floorMaterialId = m_materials.find(m_floor.materialName);
     pc.numEmissiveLights = m_lights.emissiveCount();
+    pc.bgR = m_background.r;
+    pc.bgG = m_background.g;
+    pc.bgB = m_background.b;
 
     m_devFuncs->vkCmdPushConstants(cmdBuf, m_pipelineLayout,
         VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RayPushConstants), &pc);

@@ -29,6 +29,7 @@ using parametric::CSGBVHNode;
 using parametric::Light;
 using parametric::LightList;
 using parametric::FloorSettings;
+using parametric::BackgroundSettings;
 
 // Push constants matching ray.comp
 struct RayPushConstants {
@@ -51,6 +52,8 @@ struct RayPushConstants {
     float floorY;
     uint32_t floorMaterialId;
     uint32_t numEmissiveLights;
+    float bgR, bgG, bgB;  // Background/universe color for rays that miss everything
+    float _pad;
 };
 
 // Simple orbit camera
@@ -140,6 +143,9 @@ private:
 
     // Floor settings
     FloorSettings m_floor;
+
+    // Background settings
+    BackgroundSettings m_background;
 
     // Vulkan resources
     VkPipeline m_computePipeline = VK_NULL_HANDLE;

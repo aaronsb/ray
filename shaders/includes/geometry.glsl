@@ -83,5 +83,9 @@ vec3 skyGradientWithSun(vec3 dir, vec3 sunDir, vec3 sunColor, float sunIntensity
 // Requires: lights[] buffer and pc.sunAngularRadius to be defined
 vec3 skyGradient(vec3 dir) {
     Light sun = lights[0];
+    // If no sun light, use scene-defined background color
+    if (sun.intensity < 0.001) {
+        return vec3(pc.bgR, pc.bgG, pc.bgB);
+    }
     return skyGradientWithSun(dir, sun.direction, sun.color, sun.intensity, pc.sunAngularRadius);
 }

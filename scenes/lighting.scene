@@ -6,10 +6,16 @@
 ; No sun light (intensity 0)
 (sun (intensity 0))
 
+; Universe/void color - black void (no ambient from sky)
+; Can use (background 0 1 0) for chroma key compositing
+(background 0 0 0)
+
 ; Materials
 (material ground (type checker) (rgb 0.8 0.8 0.8) (color2 0.15 0.15 0.15) (scale 1.5))
 (material white  (type diffuse) (rgb 0.95 0.95 0.95))
 (material chrome (type metal) (rgb 0.95 0.95 0.97) (roughness 0.05))
+(material gold   (type metal) (rgb 1.0 0.85 0.55) (roughness 0.1))
+(material copper (type metal) (rgb 0.95 0.64 0.54) (roughness 0.15))
 
 ; Floor
 (floor (y -0.01) ground)
@@ -26,6 +32,11 @@
 
 ; Chrome teapot in center - reflects the point lights
 (instance teapot (at 0 0.3 1.5) (scale 0.6) (rotate -90 0 0) chrome)
+
+; Metallic spheres for reflection testing
+(shape (sphere (at -4 0.8 -2) (r 0.8)) gold)
+(shape (sphere (at  4 0.8 -2) (r 0.8)) copper)
+(shape (sphere (at  0 0.6 -5) (r 0.6)) chrome)
 
 ; Small colored accent lights near floor
 (light (at -3 0.5 2) (color 1.0 0.2 0.2) (intensity 5))   ; Red accent

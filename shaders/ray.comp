@@ -53,7 +53,14 @@ layout(push_constant) uniform PushConstants {
     float floorY;            // Floor Y position
     uint floorMaterialId;    // Floor material index
     uint numEmissiveLights;  // Number of emissive area lights
+    float bgR, bgG, bgB;     // Scene background for rays that miss (when no sky)
+    float _pad;
 } pc;
+
+// Helper to get background color as vec3
+vec3 getBackgroundColor() {
+    return vec3(pc.bgR, pc.bgG, pc.bgB);
+}
 
 // Patch control points: 16 vec4s per patch (w unused, for alignment)
 layout(std430, set = 0, binding = 1) readonly buffer PatchBuffer {
@@ -173,6 +180,19 @@ layout(std430, set = 0, binding = 12) readonly buffer EmissiveLightBuffer {
 // Light type constants
 #define LIGHT_DIRECTIONAL  0
 #define LIGHT_POINT        1
+
+// Safe sun light access - returns false if sun is disabled (intensity 0)
+bool getSunLight(out vec3 direction, out vec3 color) {
+    Light sun = lights[0];
+    if (sun.intensity < 0.001) {
+        direction = vec3(0.0, 1.0, 0.0);
+        color = vec3(0.0);
+        return false;
+    }
+    direction = normalize(sun.direction);
+    color = sun.color * sun.intensity;
+    return true;
+}
 
 // Material type constants
 #define MAT_DIFFUSE   0
@@ -663,14 +683,15 @@ vec3 evaluatePointLights(vec3 hitPoint, vec3 normal, vec3 albedo) {
         vec3 lightPos = light.direction;  // For point lights, direction field holds position
         vec3 toLight = lightPos - hitPoint;
         float dist = length(toLight);
+        if (dist < 0.01) continue;  // Skip if too close (avoid infinity)
         vec3 lightDir = toLight / dist;
 
         // Check if light is on correct side of surface
         float NdotL = dot(normal, lightDir);
         if (NdotL <= 0.0) continue;
 
-        // Distance attenuation (inverse square law)
-        float attenuation = 1.0 / (dist * dist);
+        // Distance attenuation (inverse square law) with minimum distance clamp
+        float attenuation = 1.0 / max(dist * dist, 0.01);
 
         // Shadow test
         vec3 shadowOrigin = hitPoint + normal * EPSILON * 2.0;
@@ -746,6 +767,7 @@ void main() {
     Ray ray = getCameraRay(uv, jitter);
     vec3 color = vec3(0.0);
     vec3 throughput = vec3(1.0);
+    bool terminated = false;  // Track if ray was properly terminated
 
     for (int bounce = 0; bounce < MAX_BOUNCES; bounce++) {
         float t;
@@ -800,6 +822,7 @@ void main() {
         if (!hitBezier && !hitFloorFlag) {
 #endif
             color += throughput * skyGradient(ray.direction);
+            terminated = true;
             break;
         }
 
@@ -820,28 +843,30 @@ void main() {
                 floorColor = color1;
             }
 
-            vec3 lightDir = normalize(lights[0].direction);
-            vec3 lightCol = lights[0].color * lights[0].intensity;
-            float NdotL = max(dot(normal, lightDir), 0.0);
+            vec3 lightDir, lightCol;
+            bool hasSun = getSunLight(lightDir, lightCol);
+            float NdotL = hasSun ? max(dot(normal, lightDir), 0.0) : 0.0;
 
             float shadow = 1.0;
 #if FEATURE_SHADOWS
-            float shadowT;
-            vec3 shadowN;
-            uint shadowId;
-            vec3 shadowOrigin = hitPoint + normal * EPSILON * 2.0;
-            if (hitAllInstances(Ray(shadowOrigin, lightDir),
-                                EPSILON, T_MAX, shadowT, shadowN, shadowId)) {
-                shadow = 0.3;
-            }
+            if (hasSun) {
+                float shadowT;
+                vec3 shadowN;
+                uint shadowId;
+                vec3 shadowOrigin = hitPoint + normal * EPSILON * 2.0;
+                if (hitAllInstances(Ray(shadowOrigin, lightDir),
+                                    EPSILON, T_MAX, shadowT, shadowN, shadowId)) {
+                    shadow = 0.3;
+                }
 #if FEATURE_CSG
-            int shadowMat;
-            float csgShadowT;
-            vec3 csgShadowN;
-            if (hitCSG(shadowOrigin, lightDir, EPSILON, T_MAX, csgShadowT, csgShadowN, shadowMat)) {
-                shadow = 0.3;
-            }
+                int shadowMat;
+                float csgShadowT;
+                vec3 csgShadowN;
+                if (hitCSG(shadowOrigin, lightDir, EPSILON, T_MAX, csgShadowT, csgShadowN, shadowMat)) {
+                    shadow = 0.3;
+                }
 #endif
+            }
 #endif
             // Apply sun color to lit portion
             vec3 ambient = floorColor * 0.15;
@@ -855,6 +880,7 @@ void main() {
             extraLight += evaluatePointLights(hitPoint, normal, floorColor);
 #endif
             color += throughput * (ambient + diffuse + extraLight);
+            terminated = true;
             break;
         }
 
@@ -868,6 +894,7 @@ void main() {
             if (mat.type == MAT_EMISSIVE) {
                 // Emissive material - add light contribution and terminate
                 color += throughput * matColor * mat.emissive;
+                terminated = true;
                 break;
             }
 #endif
@@ -906,9 +933,9 @@ void main() {
                 throughput *= matColor;
             } else {
                 // Diffuse - simple Lambert with dynamic sun
-                vec3 lightDir = normalize(lights[0].direction);
-                vec3 lightCol = lights[0].color * lights[0].intensity;
-                float NdotL = max(dot(normal, lightDir), 0.0);
+                vec3 lightDir, lightCol;
+                bool hasSun = getSunLight(lightDir, lightCol);
+                float NdotL = hasSun ? max(dot(normal, lightDir), 0.0) : 0.0;
                 vec3 ambient = matColor * 0.15;
                 vec3 diffuse = matColor * lightCol * NdotL * 0.85;
 
@@ -920,6 +947,7 @@ void main() {
                 extraLight += evaluatePointLights(hitPoint, normal, matColor);
 #endif
                 color += throughput * (ambient + diffuse + extraLight);
+                terminated = true;
                 break;
             }
             continue;  // Bounce
@@ -944,28 +972,30 @@ void main() {
 
         // ----- DIFFUSE -----
         if (matType == MAT_DIFFUSE) {
-            vec3 lightDir = normalize(lights[0].direction);
-            vec3 lightCol = lights[0].color * lights[0].intensity;
-            float NdotL = max(dot(normal, lightDir), 0.0);
+            vec3 lightDir, lightCol;
+            bool hasSun = getSunLight(lightDir, lightCol);
+            float NdotL = hasSun ? max(dot(normal, lightDir), 0.0) : 0.0;
 
             float shadow = 1.0;
 #if FEATURE_SHADOWS
-            float shadowT;
-            vec3 shadowN;
-            uint shadowId;
-            vec3 shadowOrigin = hitPoint + normal * EPSILON * 2.0;
-            if (hitAllInstances(Ray(shadowOrigin, lightDir),
-                                EPSILON, T_MAX, shadowT, shadowN, shadowId)) {
-                shadow = 0.3;
-            }
+            if (hasSun) {
+                float shadowT;
+                vec3 shadowN;
+                uint shadowId;
+                vec3 shadowOrigin = hitPoint + normal * EPSILON * 2.0;
+                if (hitAllInstances(Ray(shadowOrigin, lightDir),
+                                    EPSILON, T_MAX, shadowT, shadowN, shadowId)) {
+                    shadow = 0.3;
+                }
 #if FEATURE_CSG
-            int shadowMat;
-            float csgShadowT;
-            vec3 csgShadowN;
-            if (hitCSG(shadowOrigin, lightDir, EPSILON, T_MAX, csgShadowT, csgShadowN, shadowMat)) {
-                shadow = 0.3;
-            }
+                int shadowMat;
+                float csgShadowT;
+                vec3 csgShadowN;
+                if (hitCSG(shadowOrigin, lightDir, EPSILON, T_MAX, csgShadowT, csgShadowN, shadowMat)) {
+                    shadow = 0.3;
+                }
 #endif
+            }
 #endif
             vec3 ambient = baseColor * 0.15;
             vec3 diffuse = baseColor * lightCol * NdotL * shadow * 0.85;
@@ -978,6 +1008,7 @@ void main() {
             extraLight += evaluatePointLights(hitPoint, normal, baseColor);
 #endif
             color += throughput * (ambient + diffuse + extraLight);
+            terminated = true;
             break;
         }
 
@@ -1049,15 +1080,31 @@ void main() {
 #if FEATURE_EMISSION
         else if (matType == MAT_EMISSIVE) {
             color += throughput * baseColor * mat.emissive;
+            terminated = true;
             break;
         }
 #endif
+    }
+
+    // Rays that exhausted max bounces without terminating (e.g., metal reflections
+    // that never escaped to sky or hit diffuse) - add background with remaining throughput
+    if (!terminated) {
+        color += throughput * skyGradient(ray.direction);
+    }
+
+    // Guard against NaN/infinity corrupting the accumulation buffer
+    if (any(isnan(color)) || any(isinf(color))) {
+        color = vec3(0.0);  // Discard invalid samples
     }
 
     // Accumulation blending (in linear space, before gamma)
 #if FEATURE_ACCUMULATION
     if (pc.frameIndex > 0) {
         vec3 accumColor = imageLoad(accumImage, pixel).rgb;
+        // Guard against corrupted accumulation buffer
+        if (any(isnan(accumColor)) || any(isinf(accumColor))) {
+            accumColor = vec3(0.0);
+        }
         float weight = 1.0 / float(pc.frameIndex + 1);
         color = mix(accumColor, color, weight);
     }
