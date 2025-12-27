@@ -135,6 +135,8 @@ private:
             processSun(expr);
         } else if (cmd == "light") {
             processPointLight(expr);
+        } else if (cmd == "spot") {
+            processSpotLight(expr);
         } else if (cmd == "floor") {
             processFloor(expr);
         } else if (cmd == "background") {
@@ -176,6 +178,8 @@ private:
                 sun.intensity = static_cast<float>(prop[1].asNumber());
             } else if (key == "radius" && prop.size() >= 2) {
                 sun.angularRadius = static_cast<float>(prop[1].asNumber());
+            } else if (key == "ambient" && prop.size() >= 2) {
+                sun.ambient = static_cast<float>(prop[1].asNumber());
             }
         }
     }
@@ -208,6 +212,91 @@ private:
         }
 
         data_.lights.pointLights.push_back(light);
+    }
+
+    // (spot (at x y z) (aim x y z) (color r g b) (intensity i) (angle outer inner) (gobo pattern scale))
+    void processSpotLight(const SExp& expr) {
+        SpotLight spot;
+        spot.posX = 0; spot.posY = 5; spot.posZ = 0;   // Default position
+        spot.dirX = 0; spot.dirY = -1; spot.dirZ = 0;  // Default pointing down
+        spot.r = 1; spot.g = 1; spot.b = 1;            // Default white
+        spot.intensity = 10.0f;
+        spot.cosInner = std::cos(15.0f * 3.14159265f / 180.0f);  // 15 degree inner
+        spot.cosOuter = std::cos(30.0f * 3.14159265f / 180.0f);  // 30 degree outer
+        spot.goboPattern = 0;  // No gobo
+        spot.goboScale = 1.0f;
+
+        // Track aim point separately so we can compute direction after position is known
+        float aimX = 0, aimY = 0, aimZ = 0;
+        bool hasAim = false;
+
+        for (size_t i = 1; i < expr.size(); i++) {
+            const auto& prop = expr[i];
+            if (!prop.isList() || prop.size() == 0) continue;
+
+            const std::string& key = prop.head();
+
+            if ((key == "at" || key == "position") && prop.size() >= 4) {
+                spot.posX = static_cast<float>(prop[1].asNumber());
+                spot.posY = static_cast<float>(prop[2].asNumber());
+                spot.posZ = static_cast<float>(prop[3].asNumber());
+            } else if ((key == "aim" || key == "target") && prop.size() >= 4) {
+                // Aim point - direction will be computed after position is parsed
+                aimX = static_cast<float>(prop[1].asNumber());
+                aimY = static_cast<float>(prop[2].asNumber());
+                aimZ = static_cast<float>(prop[3].asNumber());
+                hasAim = true;
+            } else if (key == "direction" && prop.size() >= 4) {
+                // Explicit direction vector - normalize it
+                float dx = static_cast<float>(prop[1].asNumber());
+                float dy = static_cast<float>(prop[2].asNumber());
+                float dz = static_cast<float>(prop[3].asNumber());
+                float mag = std::sqrt(dx*dx + dy*dy + dz*dz);
+                if (mag > 0.001f) {
+                    spot.dirX = dx / mag;
+                    spot.dirY = dy / mag;
+                    spot.dirZ = dz / mag;
+                }
+            } else if ((key == "color" || key == "rgb") && prop.size() >= 4) {
+                spot.r = static_cast<float>(prop[1].asNumber());
+                spot.g = static_cast<float>(prop[2].asNumber());
+                spot.b = static_cast<float>(prop[3].asNumber());
+            } else if (key == "intensity" && prop.size() >= 2) {
+                spot.intensity = static_cast<float>(prop[1].asNumber());
+            } else if (key == "angle" && prop.size() >= 2) {
+                // (angle outer) or (angle outer inner)
+                float outer = static_cast<float>(prop[1].asNumber());
+                float inner = (prop.size() >= 3) ? static_cast<float>(prop[2].asNumber()) : outer * 0.8f;
+                spot.cosOuter = std::cos(outer * 3.14159265f / 180.0f);
+                spot.cosInner = std::cos(inner * 3.14159265f / 180.0f);
+            } else if (key == "gobo" && prop.size() >= 2) {
+                // (gobo pattern) or (gobo pattern scale)
+                const std::string& pattern = prop[1].asSymbol();
+                if (pattern == "bars") spot.goboPattern = static_cast<uint32_t>(GoboPattern::Bars);
+                else if (pattern == "grid") spot.goboPattern = static_cast<uint32_t>(GoboPattern::Grid);
+                else if (pattern == "dots") spot.goboPattern = static_cast<uint32_t>(GoboPattern::Dots);
+                else if (pattern == "radial") spot.goboPattern = static_cast<uint32_t>(GoboPattern::Radial);
+                else if (pattern == "noise") spot.goboPattern = static_cast<uint32_t>(GoboPattern::Noise);
+                if (prop.size() >= 3) {
+                    spot.goboScale = static_cast<float>(prop[2].asNumber());
+                }
+            }
+        }
+
+        // Compute direction from aim point if specified
+        if (hasAim) {
+            float dx = aimX - spot.posX;
+            float dy = aimY - spot.posY;
+            float dz = aimZ - spot.posZ;
+            float mag = std::sqrt(dx*dx + dy*dy + dz*dz);
+            if (mag > 0.001f) {
+                spot.dirX = dx / mag;
+                spot.dirY = dy / mag;
+                spot.dirZ = dz / mag;
+            }
+        }
+
+        data_.lights.spotLights.push_back(spot);
     }
 
     // (floor material-name) or (floor (y -1) material-name)

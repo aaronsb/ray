@@ -24,3 +24,9 @@ void initRNG(ivec2 pixel) {
 void initRNGTemporal(ivec2 pixel, uint frame) {
     rngState = pcgHash(uint(pixel.x) + uint(pixel.y) * 10000u + frame * 100000000u);
 }
+
+// Include camera position to vary seed when camera moves (avoids repeating patterns)
+void initRNGWithCamera(ivec2 pixel, uint frame, vec3 camPos) {
+    uint camHash = pcgHash(floatBitsToUint(camPos.x) ^ floatBitsToUint(camPos.y) ^ floatBitsToUint(camPos.z));
+    rngState = pcgHash(uint(pixel.x) + uint(pixel.y) * 10000u + frame * 100000000u + camHash);
+}

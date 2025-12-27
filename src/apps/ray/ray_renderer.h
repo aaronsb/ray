@@ -32,28 +32,40 @@ using parametric::FloorSettings;
 using parametric::BackgroundSettings;
 
 // Push constants matching ray.comp
+// Push constants - 128 bytes (aligned to 16)
+// IMPORTANT: Must match shader layout exactly!
 struct RayPushConstants {
+    // Row 0: 16 bytes
     uint32_t width;
     uint32_t height;
     uint32_t numPatches;
     uint32_t numBVHNodes;
+    // Row 1: 16 bytes
     float camPosX, camPosY, camPosZ;
     uint32_t frameIndex;
+    // Row 2: 16 bytes
     float camTargetX, camTargetY, camTargetZ;
     uint32_t numInstances;
+    // Row 3: 16 bytes
     uint32_t numCSGPrimitives;
     uint32_t numCSGNodes;
     uint32_t numCSGRoots;
     uint32_t numCSGBVHNodes;
+    // Row 4: 16 bytes
     uint32_t numMaterials;
     uint32_t numLights;
     float sunAngularRadius;
     uint32_t floorEnabled;
+    // Row 5: 16 bytes
     float floorY;
     uint32_t floorMaterialId;
     uint32_t numEmissiveLights;
-    float bgR, bgG, bgB;  // Background/universe color for rays that miss everything
-    float _pad;
+    uint32_t numSpotLights;
+    // Row 6: 16 bytes
+    float bgR, bgG, bgB;
+    float skyAmbient;
+    // Row 7: 16 bytes (padding to 128 for alignment)
+    uint32_t _pad0, _pad1, _pad2, _pad3;
 };
 
 // Simple orbit camera

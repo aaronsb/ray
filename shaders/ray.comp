@@ -32,29 +32,40 @@ layout(rgba8, set = 0, binding = 0) uniform image2D outputImage;  // readwrite f
 layout(rgba32f, set = 0, binding = 5) uniform image2D accumImage;  // High precision accumulator
 #endif
 
-// Push constants
+// Push constants - 128 bytes (aligned to 16)
+// IMPORTANT: Must match C++ RayPushConstants exactly!
 layout(push_constant) uniform PushConstants {
+    // Row 0: 16 bytes
     uint width;
     uint height;
     uint numPatches;
     uint numBVHNodes;
+    // Row 1: 16 bytes
     vec3 camPos;
     uint frameIndex;
+    // Row 2: 16 bytes
     vec3 camTarget;
     uint numInstances;
+    // Row 3: 16 bytes
     uint numCSGPrimitives;
     uint numCSGNodes;
     uint numCSGRoots;
     uint numCSGBVHNodes;
+    // Row 4: 16 bytes
     uint numMaterials;
     uint numLights;
     float sunAngularRadius;  // In radians
     uint floorEnabled;       // Scene-defined floor
+    // Row 5: 16 bytes
     float floorY;            // Floor Y position
     uint floorMaterialId;    // Floor material index
     uint numEmissiveLights;  // Number of emissive area lights
+    uint numSpotLights;      // Number of spotlights
+    // Row 6: 16 bytes
     float bgR, bgG, bgB;     // Scene background for rays that miss (when no sky)
-    float _pad;
+    float skyAmbient;        // Sky ambient contribution (0 = no ambient)
+    // Row 7: 16 bytes (padding to 128 for alignment)
+    uint _pad0, _pad1, _pad2, _pad3;
 } pc;
 
 // Helper to get background color as vec3

@@ -55,7 +55,10 @@ void RayRenderer::initResources() {
             printf("  Instances:  %zu\n", m_instances.size());
             printf("  Sun:        az=%.1f° el=%.1f°\n", m_lights.sun.azimuth, m_lights.sun.elevation);
             if (m_lights.pointLightCount() > 0) {
-                printf("  Lights:     %u point lights\n", m_lights.pointLightCount());
+                printf("  Point:      %u point lights\n", m_lights.pointLightCount());
+            }
+            if (m_lights.spotLightCount() > 0) {
+                printf("  Spot:       %u spotlights\n", m_lights.spotLightCount());
             }
 
             // Build BVH for CSG roots
@@ -742,9 +745,11 @@ void RayRenderer::recordComputeCommands(VkCommandBuffer cmdBuf) {
     pc.floorY = m_floor.y;
     pc.floorMaterialId = m_materials.find(m_floor.materialName);
     pc.numEmissiveLights = m_lights.emissiveCount();
+    pc.numSpotLights = m_lights.spotLightCount();
     pc.bgR = m_background.r;
     pc.bgG = m_background.g;
     pc.bgB = m_background.b;
+    pc.skyAmbient = m_lights.skyAmbient();
 
     m_devFuncs->vkCmdPushConstants(cmdBuf, m_pipelineLayout,
         VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RayPushConstants), &pc);

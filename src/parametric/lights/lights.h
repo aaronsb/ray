@@ -12,7 +12,17 @@ namespace parametric {
 enum class LightType : uint32_t {
     Directional = 0,  // Sun/moon - infinitely distant
     Point = 1,        // Point light
-    // Area = 2,      // Future: area lights
+    Spot = 2,         // Spotlight with cone and optional gobo
+};
+
+// Gobo pattern types (procedural)
+enum class GoboPattern : uint32_t {
+    None = 0,         // No pattern (solid light)
+    Bars = 1,         // Vertical bars (window blinds)
+    Grid = 2,         // Grid pattern
+    Dots = 3,         // Dot array
+    Radial = 4,       // Radial spokes
+    Noise = 5,        // Perlin noise
 };
 
 // GPU-compatible light structure (32 bytes)
@@ -23,6 +33,19 @@ struct alignas(16) Light {
     float intensity;           // Brightness multiplier
 };
 
+// GPU-compatible spotlight structure (64 bytes)
+struct alignas(16) SpotLight {
+    float posX, posY, posZ;    // Position
+    uint32_t goboPattern;      // GoboPattern enum value
+    float dirX, dirY, dirZ;    // Direction (normalized)
+    float goboScale;           // Pattern scale (higher = more repetitions)
+    float r, g, b;             // Color
+    float intensity;           // Brightness multiplier
+    float cosInner;            // cos(inner cone angle) - full brightness inside
+    float cosOuter;            // cos(outer cone angle) - falloff to this
+    float _pad0, _pad1;
+};
+
 // Sun parameters for scene
 struct SunLight {
     float azimuth = 45.0f;     // Horizontal angle (degrees, 0 = north, 90 = east)
@@ -30,6 +53,7 @@ struct SunLight {
     float r = 1.0f, g = 0.98f, b = 0.9f;  // Warm white
     float intensity = 0.0f;    // Default 0 = no light unless scene defines it
     float angularRadius = 0.53f;  // Sun's angular radius in degrees (~0.53 for real sun)
+    float ambient = 0.15f;     // Sky ambient contribution (0 = no ambient, e.g. space)
 
     // Convert azimuth/elevation to direction vector
     void getDirection(float& x, float& y, float& z) const {
@@ -67,6 +91,7 @@ class LightList {
 public:
     SunLight sun;
     std::vector<Light> pointLights;
+    std::vector<SpotLight> spotLights;
     std::vector<EmissiveLight> emissiveLights;
 
     // Build complete light buffer (sun first, then point lights)
@@ -77,6 +102,11 @@ public:
         return result;
     }
 
+    // Build spotlight buffer
+    const std::vector<SpotLight>& spotLightBuffer() const {
+        return spotLights;
+    }
+
     // Build emissive light buffer
     const std::vector<EmissiveLight>& emissiveBuffer() const {
         return emissiveLights;
@@ -84,11 +114,15 @@ public:
 
     uint32_t sunCount() const { return 1; }
     uint32_t pointLightCount() const { return static_cast<uint32_t>(pointLights.size()); }
+    uint32_t spotLightCount() const { return static_cast<uint32_t>(spotLights.size()); }
     uint32_t emissiveCount() const { return static_cast<uint32_t>(emissiveLights.size()); }
     uint32_t totalCount() const { return sunCount() + pointLightCount(); }
 
     // Get sun angular radius for disc rendering
     float sunAngularRadius() const { return sun.angularRadius; }
+
+    // Get sky ambient level (0 = no ambient, e.g. space)
+    float skyAmbient() const { return sun.ambient; }
 };
 
 } // namespace parametric
