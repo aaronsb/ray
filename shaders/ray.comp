@@ -21,7 +21,7 @@ layout(local_size_x = 16, local_size_y = 16) in;
 #define FEATURE_AREA_LIGHTS     1   // Direct sampling of emissive surfaces (soft shadows)
 #define FEATURE_POINT_LIGHTS    1   // Point light sources with distance falloff
 #define FEATURE_FIREFLY_CLAMP   1   // Clamp bright outliers in early frames
-#define FEATURE_DIFFUSE_BOUNCE  0   // Multi-bounce GI (diffuse surfaces bounce instead of terminate)
+#define FEATURE_DIFFUSE_BOUNCE  1   // Multi-bounce GI (diffuse surfaces bounce instead of terminate)
 
 #ifndef MAX_BOUNCES
 #define MAX_BOUNCES             4   // Max ray depth (2-4 typical for interactive, higher for quality)
@@ -783,6 +783,20 @@ void main() {
     bool terminated = false;  // Track if ray was properly terminated
 
     for (int bounce = 0; bounce < MAX_BOUNCES; bounce++) {
+#if FEATURE_DIFFUSE_BOUNCE
+        // Stochastic termination: after minimum bounces, probabilistically terminate
+        // low-throughput paths. Survivors are boosted to maintain unbiased estimator.
+        if (bounce >= 2) {
+            float maxThroughput = max(throughput.r, max(throughput.g, throughput.b));
+            float survivalProb = min(maxThroughput, 0.95);  // Cap at 95% to guarantee eventual termination
+            if (rand() > survivalProb) {
+                terminated = true;
+                break;
+            }
+            throughput /= survivalProb;  // Boost survivors
+        }
+#endif
+
         float t;
         vec3 normal;
         uint instanceId;
