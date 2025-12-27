@@ -137,5 +137,5 @@
 ; ============================================================================
 ; Bezier Patch Instances (Utah Teapot)
 ; ============================================================================
-(instance teapot (at -10 0 0) (scale 0.5) (rotate 0 90 0) silver)
-(instance teapot (at  10 0 0) (scale 0.5) (rotate 0 -90 0) glass)
+(instance teapot (at -10 0 0) (scale 0.5) (rotate -90 90 0) silver)
+(instance teapot (at  10 0 0) (scale 0.5) (rotate -90 -90 0) glass)
