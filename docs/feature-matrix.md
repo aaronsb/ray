@@ -8,7 +8,7 @@ Which material types work on which geometry:
 
 | Material | Bezier Patches | CSG Primitives | Floor Plane |
 |----------|----------------|----------------|-------------|
-| **Diffuse** | ✓ Sun + shadows, area lights | ✓ Sun + shadows, area lights | ✓ Sun + shadows, area lights |
+| **Diffuse** | ✓ Sun, point, area lights + shadows | ✓ Sun, point, area lights + shadows | ✓ Sun, point, area lights + shadows |
 | **Metal** | ✓ Reflection, roughness, bump | ✓ Reflection, roughness | ✗ Not applicable |
 | **Glass** | ✓ Refraction, Fresnel, absorption | ✓ Refraction, Fresnel, absorption | ✗ Not applicable |
 | **Emissive** | ✓ Self-illumination | ✓ Self-illumination + area light source | ✗ Not implemented |
@@ -22,10 +22,12 @@ Which material types work on which geometry:
 | **Sun Disc** | Visible sun with limb darkening | ✓ Implemented |
 | **Rayleigh Sky** | Physically-based sky gradient | ✓ Implemented |
 | **Horizon Glow** | Warm tones at low sun angles | ✓ Implemented |
+| **Sky Ambient** | Scene-defined ambient from sky `(sun (ambient X))` | ✓ Implemented |
 | **Sun Shadows** | Hard shadows from directional light | ✓ All geometry types |
 | **Area Lights** | Soft shadows from emissive surfaces | ✓ CSG emissives only |
-| **Point Lights** | Omnidirectional light sources | ◐ Infrastructure only (Light struct, no shader) |
-| **Spot Lights** | Directional cone lights | ✗ Removed in refactor |
+| **Point Lights** | Omnidirectional with inverse-square falloff | ✓ Implemented |
+| **Spot Lights** | Cone lights with inner/outer angle falloff | ✓ Implemented |
+| **Gobo Patterns** | Procedural spotlight masks (bars, grid, dots, radial, noise) | ✓ Implemented |
 
 ### Historical Features (Removed)
 
@@ -33,7 +35,6 @@ Features that existed in earlier versions but were removed during the clean-slat
 
 | Feature | Description | Removal Reason |
 |---------|-------------|----------------|
-| **Spotlights + Gobos** | Cone lights with 6 gobo patterns (stripes, grid, circles, dots, star) | Clean slate refactor (`e4bf66e`) |
 | **Day/Night Cycle** | Sun position-based twilight transitions | Simplified to always-day |
 | **Star Field** | Procedural stars at night | Removed with day/night |
 | **NEE Sphere Lights** | Hardcoded emissive sphere sampling | Replaced by area lights |
@@ -92,6 +93,8 @@ Who casts shadows on whom:
 | **Bump Mapping** | `FEATURE_BUMP` | Procedural normal perturbation |
 | **Emission** | `FEATURE_EMISSION` | Self-illuminating materials |
 | **Area Lights** | `FEATURE_AREA_LIGHTS` | Direct sampling of emissives |
+| **Point Lights** | `FEATURE_POINT_LIGHTS` | Point light evaluation |
+| **Firefly Clamp** | `FEATURE_FIREFLY_CLAMP` | Adaptive luminance clamping for early frames |
 | **Accumulation** | `FEATURE_ACCUMULATION` | Progressive refinement |
 | **Jitter** | `FEATURE_JITTER` | Subpixel anti-aliasing |
 | **CSG** | `FEATURE_CSG` | Constructive solid geometry |
