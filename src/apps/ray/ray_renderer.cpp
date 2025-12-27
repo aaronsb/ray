@@ -801,9 +801,15 @@ void RayRenderer::createCSGBuffers() {
     }
 
     // Upload BVH-reordered root indices (or original roots if no BVH)
+    // Note: bvhRootIndices contains indices INTO roots[], not actual node indices
+    // We need to dereference: reorderedRoots[i] = roots[bvhRootIndices[i]]
     if (!bvhRootIndices.empty()) {
+        std::vector<uint32_t> reorderedRoots(bvhRootIndices.size());
+        for (size_t i = 0; i < bvhRootIndices.size(); i++) {
+            reorderedRoots[i] = roots[bvhRootIndices[i]];
+        }
         m_devFuncs->vkMapMemory(dev, m_csgRootBufferMemory, 0, rootSize, 0, &data);
-        memcpy(data, bvhRootIndices.data(), bvhRootIndices.size() * sizeof(uint32_t));
+        memcpy(data, reorderedRoots.data(), reorderedRoots.size() * sizeof(uint32_t));
         m_devFuncs->vkUnmapMemory(dev, m_csgRootBufferMemory);
     } else if (!roots.empty()) {
         m_devFuncs->vkMapMemory(dev, m_csgRootBufferMemory, 0, rootSize, 0, &data);
