@@ -9,6 +9,7 @@
 #include <vector>
 #include "../../parametric/bezier/patch_group.h"
 #include "../../parametric/csg/csg.h"
+#include "../../parametric/csg/csg_bvh.h"
 #include "../../parametric/materials/material.h"
 #include "../../parametric/scene/scene_loader.h"
 
@@ -22,6 +23,8 @@ using parametric::CSGPrimitive;
 using parametric::CSGNode;
 using parametric::Material;
 using parametric::MaterialLibrary;
+using parametric::CSGBVH;
+using parametric::CSGBVHNode;
 
 // Push constants matching ray.comp
 struct RayPushConstants {
@@ -36,6 +39,7 @@ struct RayPushConstants {
     uint32_t numCSGPrimitives;
     uint32_t numCSGNodes;
     uint32_t numCSGRoots;
+    uint32_t numCSGBVHNodes;
     uint32_t numMaterials;
 };
 
@@ -116,6 +120,7 @@ private:
 
     // CSG scene data
     CSGScene m_csgScene;
+    CSGBVH m_csgBVH;
 
     // Material library
     MaterialLibrary m_materials;
@@ -160,6 +165,8 @@ private:
     VkDeviceMemory m_csgNodeBufferMemory = VK_NULL_HANDLE;
     VkBuffer m_csgRootBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_csgRootBufferMemory = VK_NULL_HANDLE;
+    VkBuffer m_csgBVHBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_csgBVHBufferMemory = VK_NULL_HANDLE;
 
     // Material buffer
     VkBuffer m_materialBuffer = VK_NULL_HANDLE;

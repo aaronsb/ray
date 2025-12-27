@@ -65,7 +65,7 @@ inline void subdividePatch(const Patch& p, Patch quad[4]) {
 inline void subdivideRecursive(const Patch& p, int depth, int maxDepth,
                                float flatnessThreshold,
                                std::vector<SubPatch>& result) {
-    AABB bounds = AABB::fromPatch(p);
+    AABB bounds = aabbFromPatch(p);
 
     if (depth >= maxDepth || bounds.diagonal() < flatnessThreshold) {
         SubPatch sp;

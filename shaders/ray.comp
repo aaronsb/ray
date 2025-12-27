@@ -43,6 +43,7 @@ layout(push_constant) uniform PushConstants {
     uint numCSGPrimitives;
     uint numCSGNodes;
     uint numCSGRoots;
+    uint numCSGBVHNodes;
     uint numMaterials;
 } pc;
 
@@ -122,6 +123,18 @@ struct Material {
 
 layout(std430, set = 0, binding = 9) readonly buffer MaterialBuffer {
     Material materials[];
+};
+
+// CSG BVH node (must match CPU CSGBVHNode struct)
+struct CSGBVHNode {
+    float minX, minY, minZ;
+    uint leftOrFirst;   // Left child index, or first root index if leaf
+    float maxX, maxY, maxZ;
+    uint rightOrCount;  // Right child index, or root count if leaf (high bit = leaf flag)
+};
+
+layout(std430, set = 0, binding = 10) readonly buffer CSGBVHBuffer {
+    CSGBVHNode csgBVHNodes[];
 };
 
 // Material type constants
@@ -266,27 +279,84 @@ Interval evaluateCSGNode(vec3 ro, vec3 rd, uint nodeIndex) {
     return (resultPtr > 0) ? resultStack[0] : EMPTY_INTERVAL;
 }
 
-// CSG scene evaluation from buffers
+// CSG BVH helper functions
+bool isCSGBVHLeaf(uint nodeIdx) {
+    return (csgBVHNodes[nodeIdx].rightOrCount & 0x80000000u) != 0u;
+}
+
+uint csgBVHRootCount(uint nodeIdx) {
+    return csgBVHNodes[nodeIdx].rightOrCount & 0x7FFFFFFFu;
+}
+
+// CSG scene evaluation from buffers with BVH acceleration
 // Returns material ID via outMat
 bool hitCSG(vec3 ro, vec3 rd, float tMin, float tMax, out float hitT, out vec3 hitN, out int outMat) {
     float closestT = tMax;
     bool hit = false;
 
-    // Iterate through all root nodes
-    for (uint i = 0; i < pc.numCSGRoots; i++) {
-        uint rootNodeIndex = csgRoots[i];
-        CSGNode rootNode = csgNodes[rootNodeIndex];
+    // If no BVH, fall back to linear iteration
+    if (pc.numCSGBVHNodes == 0) {
+        for (uint i = 0; i < pc.numCSGRoots; i++) {
+            uint rootNodeIndex = csgRoots[i];
+            CSGNode rootNode = csgNodes[rootNodeIndex];
 
-        Interval interval = evaluateCSGNode(ro, rd, rootNodeIndex);
+            Interval interval = evaluateCSGNode(ro, rd, rootNodeIndex);
 
-        float t;
-        vec3 n;
-        if (firstHit(interval, tMin, closestT, t, n)) {
-            closestT = t;
-            hitT = t;
-            hitN = n;
-            outMat = int(rootNode.materialId);
-            hit = true;
+            float t;
+            vec3 n;
+            if (firstHit(interval, tMin, closestT, t, n)) {
+                closestT = t;
+                hitT = t;
+                hitN = n;
+                outMat = int(rootNode.materialId);
+                hit = true;
+            }
+        }
+        return hit;
+    }
+
+    // BVH traversal stack
+    uint stack[32];
+    int stackPtr = 0;
+    stack[stackPtr++] = 0;  // Start with root node
+
+    while (stackPtr > 0) {
+        uint nodeIdx = stack[--stackPtr];
+        CSGBVHNode node = csgBVHNodes[nodeIdx];
+
+        vec3 aabbMin = vec3(node.minX, node.minY, node.minZ);
+        vec3 aabbMax = vec3(node.maxX, node.maxY, node.maxZ);
+
+        // Skip if ray doesn't hit this node's AABB
+        if (!hitAABB(aabbMin, aabbMax, ro, rd, tMin, closestT)) {
+            continue;
+        }
+
+        if (isCSGBVHLeaf(nodeIdx)) {
+            // Leaf node - test all roots in this leaf
+            uint first = node.leftOrFirst;
+            uint count = csgBVHRootCount(nodeIdx);
+
+            for (uint i = 0; i < count; i++) {
+                uint rootNodeIndex = csgRoots[first + i];
+                CSGNode rootNode = csgNodes[rootNodeIndex];
+
+                Interval interval = evaluateCSGNode(ro, rd, rootNodeIndex);
+
+                float t;
+                vec3 n;
+                if (firstHit(interval, tMin, closestT, t, n)) {
+                    closestT = t;
+                    hitT = t;
+                    hitN = n;
+                    outMat = int(rootNode.materialId);
+                    hit = true;
+                }
+            }
+        } else {
+            // Internal node - push children
+            stack[stackPtr++] = node.rightOrCount;
+            stack[stackPtr++] = node.leftOrFirst;
         }
     }
 

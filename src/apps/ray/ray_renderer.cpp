@@ -50,6 +50,12 @@ void RayRenderer::initResources() {
             printf("  Nodes:      %u\n", m_csgScene.nodeCount());
             printf("  Roots:      %u\n", m_csgScene.rootCount());
             printf("  Instances:  %zu\n", m_instances.size());
+
+            // Build BVH for CSG roots
+            m_csgBVH.build(m_csgScene);
+            if (!m_csgBVH.empty()) {
+                printf("  CSG BVH:    %zu nodes\n", m_csgBVH.nodeCount());
+            }
             sceneLoaded = true;
         } else {
             fprintf(stderr, "Failed to parse scene file: %s\n", qPrintable(m_scenePath));
@@ -183,6 +189,14 @@ void RayRenderer::releaseResources() {
     if (m_csgRootBufferMemory) {
         m_devFuncs->vkFreeMemory(dev, m_csgRootBufferMemory, nullptr);
         m_csgRootBufferMemory = VK_NULL_HANDLE;
+    }
+    if (m_csgBVHBuffer) {
+        m_devFuncs->vkDestroyBuffer(dev, m_csgBVHBuffer, nullptr);
+        m_csgBVHBuffer = VK_NULL_HANDLE;
+    }
+    if (m_csgBVHBufferMemory) {
+        m_devFuncs->vkFreeMemory(dev, m_csgBVHBufferMemory, nullptr);
+        m_csgBVHBufferMemory = VK_NULL_HANDLE;
     }
 
     // Material buffer
@@ -335,10 +349,10 @@ void RayRenderer::createPatchBuffers() {
 void RayRenderer::createDescriptorSet() {
     VkDevice dev = m_window->device();
 
-    // Create descriptor pool (2 images + 8 buffers)
+    // Create descriptor pool (2 images + 9 buffers)
     std::array<VkDescriptorPoolSize, 2> poolSizes{};
     poolSizes[0] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2};  // output + accumulation
-    poolSizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8};  // patches, BVH, indices, instances, CSG prims/nodes/roots, materials
+    poolSizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 9};  // patches, BVH, indices, instances, CSG prims/nodes/roots/bvh, materials
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -410,7 +424,12 @@ void RayRenderer::createDescriptorSet() {
     materialBufferInfo.offset = 0;
     materialBufferInfo.range = VK_WHOLE_SIZE;
 
-    std::array<VkWriteDescriptorSet, 10> writes{};
+    VkDescriptorBufferInfo csgBVHBufferInfo{};
+    csgBVHBufferInfo.buffer = m_csgBVHBuffer;
+    csgBVHBufferInfo.offset = 0;
+    csgBVHBufferInfo.range = VK_WHOLE_SIZE;
+
+    std::array<VkWriteDescriptorSet, 11> writes{};
 
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[0].dstSet = m_descriptorSet;
@@ -484,14 +503,22 @@ void RayRenderer::createDescriptorSet() {
     writes[9].descriptorCount = 1;
     writes[9].pBufferInfo = &materialBufferInfo;
 
+    // CSG BVH buffer (binding 10)
+    writes[10].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[10].dstSet = m_descriptorSet;
+    writes[10].dstBinding = 10;
+    writes[10].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[10].descriptorCount = 1;
+    writes[10].pBufferInfo = &csgBVHBufferInfo;
+
     m_devFuncs->vkUpdateDescriptorSets(dev, writes.size(), writes.data(), 0, nullptr);
 }
 
 void RayRenderer::createComputePipeline() {
     VkDevice dev = m_window->device();
 
-    // Descriptor set layout (10 bindings: output image, 4 buffers, accum image, 3 CSG buffers, materials)
-    std::array<VkDescriptorSetLayoutBinding, 10> bindings{};
+    // Descriptor set layout (11 bindings: output image, 4 buffers, accum image, 4 CSG buffers, materials)
+    std::array<VkDescriptorSetLayoutBinding, 11> bindings{};
 
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -544,6 +571,12 @@ void RayRenderer::createComputePipeline() {
     bindings[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[9].descriptorCount = 1;
     bindings[9].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    // CSG BVH buffer (binding 10)
+    bindings[10].binding = 10;
+    bindings[10].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[10].descriptorCount = 1;
+    bindings[10].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -627,6 +660,7 @@ void RayRenderer::recordComputeCommands(VkCommandBuffer cmdBuf) {
     pc.numCSGPrimitives = m_csgScene.primitiveCount();
     pc.numCSGNodes = m_csgScene.nodeCount();
     pc.numCSGRoots = m_csgScene.rootCount();
+    pc.numCSGBVHNodes = static_cast<uint32_t>(m_csgBVH.nodeCount());
     pc.numMaterials = m_materials.count();
 
     m_devFuncs->vkCmdPushConstants(cmdBuf, m_pipelineLayout,
@@ -725,11 +759,14 @@ void RayRenderer::createCSGBuffers() {
     const auto& prims = m_csgScene.primitives();
     const auto& nodes = m_csgScene.nodes();
     const auto& roots = m_csgScene.roots();
+    const auto& bvhNodes = m_csgBVH.nodes;
+    const auto& bvhRootIndices = m_csgBVH.rootIndices;
 
     // Minimum size to avoid empty buffer issues
     size_t primSize = std::max(prims.size() * sizeof(CSGPrimitive), size_t(32));
     size_t nodeSize = std::max(nodes.size() * sizeof(CSGNode), size_t(16));
-    size_t rootSize = std::max(roots.size() * sizeof(uint32_t), size_t(4));
+    size_t rootSize = std::max(bvhRootIndices.size() * sizeof(uint32_t), size_t(4));
+    size_t bvhSize = std::max(bvhNodes.size() * sizeof(CSGBVHNode), size_t(32));
 
     // Create buffers
     createBuffer(primSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
@@ -743,6 +780,10 @@ void RayRenderer::createCSGBuffers() {
     createBuffer(rootSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                  m_csgRootBuffer, m_csgRootBufferMemory);
+
+    createBuffer(bvhSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 m_csgBVHBuffer, m_csgBVHBufferMemory);
 
     // Upload data
     void* data;
@@ -759,14 +800,25 @@ void RayRenderer::createCSGBuffers() {
         m_devFuncs->vkUnmapMemory(dev, m_csgNodeBufferMemory);
     }
 
-    if (!roots.empty()) {
+    // Upload BVH-reordered root indices (or original roots if no BVH)
+    if (!bvhRootIndices.empty()) {
+        m_devFuncs->vkMapMemory(dev, m_csgRootBufferMemory, 0, rootSize, 0, &data);
+        memcpy(data, bvhRootIndices.data(), bvhRootIndices.size() * sizeof(uint32_t));
+        m_devFuncs->vkUnmapMemory(dev, m_csgRootBufferMemory);
+    } else if (!roots.empty()) {
         m_devFuncs->vkMapMemory(dev, m_csgRootBufferMemory, 0, rootSize, 0, &data);
         memcpy(data, roots.data(), roots.size() * sizeof(uint32_t));
         m_devFuncs->vkUnmapMemory(dev, m_csgRootBufferMemory);
     }
 
-    printf("Uploaded CSG: %zu primitives (%.1f KB), %zu nodes, %zu roots\n",
-           prims.size(), primSize / 1024.0f, nodes.size(), roots.size());
+    if (!bvhNodes.empty()) {
+        m_devFuncs->vkMapMemory(dev, m_csgBVHBufferMemory, 0, bvhSize, 0, &data);
+        memcpy(data, bvhNodes.data(), bvhNodes.size() * sizeof(CSGBVHNode));
+        m_devFuncs->vkUnmapMemory(dev, m_csgBVHBufferMemory);
+    }
+
+    printf("Uploaded CSG: %zu primitives (%.1f KB), %zu nodes, %zu roots, %zu BVH nodes\n",
+           prims.size(), primSize / 1024.0f, nodes.size(), bvhRootIndices.size(), bvhNodes.size());
 }
 
 uint32_t RayRenderer::findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {

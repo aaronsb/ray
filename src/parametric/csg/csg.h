@@ -85,6 +85,15 @@ public:
     uint32_t nodeCount() const { return static_cast<uint32_t>(m_nodes.size()); }
     uint32_t rootCount() const { return static_cast<uint32_t>(m_roots.size()); }
 
+    // Compute AABB for a primitive
+    AABB computePrimitiveAABB(uint32_t primIndex) const;
+
+    // Compute AABB for a CSG node (recursive through tree)
+    AABB computeNodeAABB(uint32_t nodeIndex) const;
+
+    // Compute AABBs for all roots
+    std::vector<AABB> computeRootAABBs() const;
+
     void clear();
 
 private:
@@ -192,6 +201,63 @@ inline void CSGScene::clear() {
     m_primitives.clear();
     m_nodes.clear();
     m_roots.clear();
+}
+
+inline AABB CSGScene::computePrimitiveAABB(uint32_t primIndex) const {
+    const CSGPrimitive& p = m_primitives[primIndex];
+    Vec3 center(p.x, p.y, p.z);
+
+    switch (static_cast<CSGPrimType>(p.type)) {
+        case CSGPrimType::Sphere: {
+            float r = p.param0;
+            return AABB(Vec3(p.x - r, p.y - r, p.z - r),
+                       Vec3(p.x + r, p.y + r, p.z + r));
+        }
+        case CSGPrimType::Box: {
+            return AABB(Vec3(p.x - p.param0, p.y - p.param1, p.z - p.param2),
+                       Vec3(p.x + p.param0, p.y + p.param1, p.z + p.param2));
+        }
+        case CSGPrimType::Cylinder: {
+            float r = p.param0, h = p.param1;
+            return AABB(Vec3(p.x - r, p.y, p.z - r),
+                       Vec3(p.x + r, p.y + h, p.z + r));
+        }
+        case CSGPrimType::Cone: {
+            float r = p.param0, h = p.param1;
+            return AABB(Vec3(p.x - r, p.y, p.z - r),
+                       Vec3(p.x + r, p.y + h, p.z + r));
+        }
+        case CSGPrimType::Torus: {
+            float R = p.param0, r = p.param1;
+            float extent = R + r;
+            return AABB(Vec3(p.x - extent, p.y - r, p.z - extent),
+                       Vec3(p.x + extent, p.y + r, p.z + extent));
+        }
+    }
+    return AABB();
+}
+
+inline AABB CSGScene::computeNodeAABB(uint32_t nodeIndex) const {
+    const CSGNode& node = m_nodes[nodeIndex];
+
+    if (node.type == static_cast<uint32_t>(CSGNodeType::Primitive)) {
+        return computePrimitiveAABB(node.left);
+    }
+
+    // For all CSG operations, conservatively use union of child AABBs
+    AABB left = computeNodeAABB(node.left);
+    AABB right = computeNodeAABB(node.right);
+    left.expand(right);
+    return left;
+}
+
+inline std::vector<AABB> CSGScene::computeRootAABBs() const {
+    std::vector<AABB> result;
+    result.reserve(m_roots.size());
+    for (uint32_t rootIdx : m_roots) {
+        result.push_back(computeNodeAABB(rootIdx));
+    }
+    return result;
 }
 
 } // namespace parametric
