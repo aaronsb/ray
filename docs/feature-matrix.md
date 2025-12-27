@@ -24,8 +24,19 @@ Which material types work on which geometry:
 | **Horizon Glow** | Warm tones at low sun angles | ✓ Implemented |
 | **Sun Shadows** | Hard shadows from directional light | ✓ All geometry types |
 | **Area Lights** | Soft shadows from emissive surfaces | ✓ CSG emissives only |
-| **Point Lights** | Omnidirectional light sources | ✗ Not implemented |
-| **Spot Lights** | Directional cone lights | ✗ Not implemented |
+| **Point Lights** | Omnidirectional light sources | ◐ Infrastructure only (Light struct, no shader) |
+| **Spot Lights** | Directional cone lights | ✗ Removed in refactor |
+
+### Historical Features (Removed)
+
+Features that existed in earlier versions but were removed during the clean-slate refactor:
+
+| Feature | Description | Removal Reason |
+|---------|-------------|----------------|
+| **Spotlights + Gobos** | Cone lights with 6 gobo patterns (stripes, grid, circles, dots, star) | Clean slate refactor (`e4bf66e`) |
+| **Day/Night Cycle** | Sun position-based twilight transitions | Simplified to always-day |
+| **Star Field** | Procedural stars at night | Removed with day/night |
+| **NEE Sphere Lights** | Hardcoded emissive sphere sampling | Replaced by area lights |
 
 ## Shadow Coverage
 
