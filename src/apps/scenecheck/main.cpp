@@ -2,9 +2,11 @@
 // Usage: scenecheck <file.scene> [--dump]
 
 #include "../../parametric/scene/scene_loader.h"
+#include "../../parametric/lights/lights.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
+#include <iomanip>
 
 using namespace parametric;
 
@@ -13,12 +15,36 @@ void printUsage(const char* prog) {
     std::cerr << "  --dump  Print parsed scene structure\n";
 }
 
-void dumpMaterial(const Material& m, size_t idx) {
-    const char* typeNames[] = {"diffuse", "metal", "glass", "emissive"};
-    std::cout << "  [" << idx << "] type=" << typeNames[m.type]
-              << " rgb(" << m.r << ", " << m.g << ", " << m.b << ")"
-              << " roughness=" << m.roughness
-              << " ior=" << m.ior << "\n";
+const char* goboPatternName(uint32_t pattern) {
+    switch (pattern) {
+        case 0: return "none";
+        case 1: return "bars";
+        case 2: return "grid";
+        case 3: return "dots";
+        case 4: return "radial";
+        case 5: return "noise";
+        default: return "unknown";
+    }
+}
+
+void dumpMaterial(const Material& m, size_t idx, const std::string& name) {
+    const char* typeNames[] = {"diffuse", "metal", "glass", "emissive", "checker"};
+    uint32_t type = m.type < 5 ? m.type : 0;
+    std::cout << "  [" << idx << "] ";
+    if (!name.empty()) std::cout << "\"" << name << "\" ";
+    std::cout << typeNames[type];
+    std::cout << " rgb(" << m.r << ", " << m.g << ", " << m.b << ")";
+    if (m.type == 1) { // metal
+        std::cout << " roughness=" << m.roughness;
+        if (m.metallic > 0) std::cout << " metallic=" << m.metallic;
+    } else if (m.type == 2) { // glass
+        std::cout << " ior=" << m.ior;
+    } else if (m.type == 3) { // emissive
+        std::cout << " emissive=" << m.emissive;
+    } else if (m.type == 4) { // checker
+        std::cout << " scale=" << m.emissive;
+    }
+    std::cout << "\n";
 }
 
 void dumpPrimitive(const CSGPrimitive& p, size_t idx) {
@@ -95,17 +121,37 @@ int main(int argc, char* argv[]) {
     if (SceneLoader::loadFile(filepath, data)) {
         std::cout << "  Scene load: OK\n";
         std::cout << "\nScene summary:\n";
-        std::cout << "  Materials:  " << data.materials.count() << "\n";
-        std::cout << "  Primitives: " << data.csg.primitiveCount() << "\n";
-        std::cout << "  Nodes:      " << data.csg.nodeCount() << "\n";
-        std::cout << "  Roots:      " << data.csg.rootCount() << "\n";
-        std::cout << "  Patches:    " << data.patchGroups.size() << " groups\n";
-        std::cout << "  Instances:  " << data.patchInstances.size() << "\n";
+        std::cout << "  Materials:    " << data.materials.count() << "\n";
+        std::cout << "  Primitives:   " << data.csg.primitiveCount() << "\n";
+        std::cout << "  Nodes:        " << data.csg.nodeCount() << "\n";
+        std::cout << "  Roots:        " << data.csg.rootCount() << "\n";
+        std::cout << "  Patches:      " << data.patchGroups.size() << " groups\n";
+        std::cout << "  Instances:    " << data.patchInstances.size() << "\n";
+        std::cout << "  Point lights: " << data.lights.pointLightCount() << "\n";
+        std::cout << "  Spotlights:   " << data.lights.spotLightCount() << "\n";
+
+        std::cout << "\nSun:\n";
+        std::cout << "  Azimuth:    " << data.lights.sun.azimuth << " deg\n";
+        std::cout << "  Elevation:  " << data.lights.sun.elevation << " deg\n";
+        std::cout << "  Color:      (" << data.lights.sun.r << ", " << data.lights.sun.g << ", " << data.lights.sun.b << ")\n";
+        std::cout << "  Intensity:  " << data.lights.sun.intensity << "\n";
+        std::cout << "  Ambient:    " << data.lights.sun.ambient << "\n";
+
+        std::cout << "\nFloor:\n";
+        std::cout << "  Enabled:  " << (data.floor.enabled ? "yes" : "no") << "\n";
+        if (data.floor.enabled) {
+            std::cout << "  Y:        " << data.floor.y << "\n";
+            std::cout << "  Material: " << data.floor.materialName << "\n";
+        }
+
+        std::cout << "\nBackground:\n";
+        std::cout << "  Color: (" << data.background.r << ", " << data.background.g << ", " << data.background.b << ")\n";
 
         if (dump) {
             std::cout << "\nMaterials:\n";
             for (size_t i = 0; i < data.materials.materials().size(); i++) {
-                dumpMaterial(data.materials.materials()[i], i);
+                std::string name = data.materials.nameForIndex(static_cast<uint32_t>(i));
+                dumpMaterial(data.materials.materials()[i], i, name);
             }
 
             std::cout << "\nPrimitives:\n";
@@ -135,6 +181,32 @@ int main(int argc, char* argv[]) {
                           << " at(" << inst.x << ", " << inst.y << ", " << inst.z << ")"
                           << " scale=" << inst.scale
                           << " mat=" << inst.materialName << "\n";
+            }
+
+            if (!data.lights.pointLights.empty()) {
+                std::cout << "\nPoint Lights:\n";
+                for (size_t i = 0; i < data.lights.pointLights.size(); i++) {
+                    const auto& l = data.lights.pointLights[i];
+                    // Note: dirX/Y/Z stores position for point lights
+                    std::cout << "  [" << i << "] at(" << l.dirX << ", " << l.dirY << ", " << l.dirZ << ")"
+                              << " color(" << l.r << ", " << l.g << ", " << l.b << ")"
+                              << " intensity=" << l.intensity << "\n";
+                }
+            }
+
+            if (!data.lights.spotLights.empty()) {
+                std::cout << "\nSpotlights:\n";
+                for (size_t i = 0; i < data.lights.spotLights.size(); i++) {
+                    const auto& s = data.lights.spotLights[i];
+                    std::cout << "  [" << i << "] at(" << s.posX << ", " << s.posY << ", " << s.posZ << ")"
+                              << " dir(" << s.dirX << ", " << s.dirY << ", " << s.dirZ << ")\n";
+                    std::cout << "       color(" << s.r << ", " << s.g << ", " << s.b << ")"
+                              << " intensity=" << s.intensity << "\n";
+                    std::cout << "       angles: inner=" << std::acos(s.cosInner) * 180.0f / 3.14159265f
+                              << " outer=" << std::acos(s.cosOuter) * 180.0f / 3.14159265f << " deg\n";
+                    std::cout << "       gobo: " << goboPatternName(s.goboPattern)
+                              << " scale=" << s.goboScale << "\n";
+                }
             }
         }
 

@@ -41,6 +41,9 @@ public:
     // Lookup by name (returns 0 if not found)
     uint32_t find(const std::string& name) const;
 
+    // Reverse lookup: get name for index (empty if anonymous)
+    std::string nameForIndex(uint32_t idx) const;
+
     // Data accessor for GPU upload
     const std::vector<Material>& materials() const { return m_materials; }
     uint32_t count() const { return static_cast<uint32_t>(m_materials.size()); }
@@ -69,6 +72,13 @@ inline uint32_t MaterialLibrary::add(const std::string& name, const Material& ma
 inline uint32_t MaterialLibrary::find(const std::string& name) const {
     auto it = m_nameIndex.find(name);
     return (it != m_nameIndex.end()) ? it->second : 0;
+}
+
+inline std::string MaterialLibrary::nameForIndex(uint32_t idx) const {
+    for (const auto& [name, index] : m_nameIndex) {
+        if (index == idx) return name;
+    }
+    return "";
 }
 
 inline void MaterialLibrary::clear() {
