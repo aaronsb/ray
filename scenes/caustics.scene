@@ -1,0 +1,50 @@
+; Caustics Scene - Focused light through glass
+; Goal: See bright caustic hotspots on the floor from refracted sunlight
+
+; ============================================================================
+; Materials
+; ============================================================================
+(material glass (type glass) (rgb 0.98 0.98 1.0) (ior 1.5))
+(material water-glass (type glass) (rgb 0.9 0.95 1.0) (ior 1.33))
+(material diamond (type glass) (rgb 1.0 1.0 1.0) (ior 2.4))
+(material white (type diffuse) (rgb 0.9 0.9 0.9))
+(material red (type diffuse) (rgb 0.8 0.2 0.1))
+
+; Strong directional sun for sharp caustics
+(sun (azimuth 30) (elevation 55) (intensity 3.0) (color 1.0 0.98 0.92) (ambient 0.1))
+
+; Checker floor material and floor
+(material checker-floor (type checker) (rgb 0.9 0.9 0.9) (color2 0.15 0.15 0.15) (scale 1.0))
+(floor (y 0) checker-floor)
+
+; ============================================================================
+; Glass spheres - act as lenses to focus light
+; ============================================================================
+
+; Large glass sphere - should create circular caustic
+(shape (sphere (at 0 1.5 0) (r 1.5)) glass)
+
+; Smaller high-IOR sphere (diamond) - tighter caustic focus
+(shape (sphere (at -3 0.8 1) (r 0.8)) diamond)
+
+; Water-glass sphere - softer caustic
+(shape (sphere (at 3 1.0 -1) (r 1.0)) water-glass)
+
+; ============================================================================
+; Glass cylinder - creates line caustic
+; ============================================================================
+(shape (cylinder (at 0 0.4 -4) (r 0.4) (h 3.0)) glass)
+
+; ============================================================================
+; Reference objects to show scale
+; ============================================================================
+
+; Small diffuse sphere for shadow/lighting reference
+(shape (sphere (at -2 0.4 3) (r 0.4)) white)
+(shape (sphere (at 2 0.3 2.5) (r 0.3)) red)
+
+; ============================================================================
+; Camera hint: position to see floor with caustics
+; Default view should show glass objects from above-ish angle
+; to see both the objects and the caustic patterns on the floor
+; ============================================================================
