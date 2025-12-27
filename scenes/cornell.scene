@@ -11,10 +11,8 @@
 (material rough-mirror (type metal) (rgb 0.85 0.85 0.88) (roughness 0.15) (metallic 0.3))
 (material light   (type emissive) (rgb 1.0 0.95 0.85) (emissive 15.0))
 
-; ============================================================================
-; Sun (dim, since we have an emissive light)
-; ============================================================================
-(sun (azimuth 45) (elevation 60) (color 1.0 0.98 0.9) (intensity 0.1))
+; No sun - pure black void, illumination only from emissive panel
+; (sun (azimuth 45) (elevation 60) (color 1.0 0.98 0.9) (intensity 0.1))
 
 ; ============================================================================
 ; Cornell Box Walls (5 unit box, centered at y=2.5)

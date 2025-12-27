@@ -59,6 +59,13 @@ void RayRenderer::initResources() {
             if (!m_csgBVH.empty()) {
                 printf("  CSG BVH:    %zu nodes\n", m_csgBVH.nodeCount());
             }
+
+            // Find emissive CSG objects for area light sampling
+            findEmissiveLights();
+            if (!m_lights.emissiveLights.empty()) {
+                printf("  Emissive:   %u area lights\n", m_lights.emissiveCount());
+            }
+
             sceneLoaded = true;
         } else {
             fprintf(stderr, "Failed to parse scene file: %s\n", qPrintable(m_scenePath));
@@ -221,6 +228,16 @@ void RayRenderer::releaseResources() {
         m_devFuncs->vkFreeMemory(dev, m_lightBufferMemory, nullptr);
         m_lightBufferMemory = VK_NULL_HANDLE;
     }
+
+    // Emissive light buffer
+    if (m_emissiveLightBuffer) {
+        m_devFuncs->vkDestroyBuffer(dev, m_emissiveLightBuffer, nullptr);
+        m_emissiveLightBuffer = VK_NULL_HANDLE;
+    }
+    if (m_emissiveLightBufferMemory) {
+        m_devFuncs->vkFreeMemory(dev, m_emissiveLightBufferMemory, nullptr);
+        m_emissiveLightBufferMemory = VK_NULL_HANDLE;
+    }
 }
 
 void RayRenderer::startNextFrame() {
@@ -358,15 +375,16 @@ void RayRenderer::createPatchBuffers() {
     createCSGBuffers();
     createMaterialBuffer();
     createLightBuffer();
+    createEmissiveLightBuffer();
 }
 
 void RayRenderer::createDescriptorSet() {
     VkDevice dev = m_window->device();
 
-    // Create descriptor pool (2 images + 10 buffers)
+    // Create descriptor pool (2 images + 11 buffers)
     std::array<VkDescriptorPoolSize, 2> poolSizes{};
     poolSizes[0] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2};  // output + accumulation
-    poolSizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 10};  // patches, BVH, indices, instances, CSG prims/nodes/roots/bvh, materials, lights
+    poolSizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 11};  // patches, BVH, indices, instances, CSG prims/nodes/roots/bvh, materials, lights, emissive
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -448,7 +466,12 @@ void RayRenderer::createDescriptorSet() {
     lightBufferInfo.offset = 0;
     lightBufferInfo.range = VK_WHOLE_SIZE;
 
-    std::array<VkWriteDescriptorSet, 12> writes{};
+    VkDescriptorBufferInfo emissiveBufferInfo{};
+    emissiveBufferInfo.buffer = m_emissiveLightBuffer;
+    emissiveBufferInfo.offset = 0;
+    emissiveBufferInfo.range = VK_WHOLE_SIZE;
+
+    std::array<VkWriteDescriptorSet, 13> writes{};
 
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[0].dstSet = m_descriptorSet;
@@ -538,14 +561,22 @@ void RayRenderer::createDescriptorSet() {
     writes[11].descriptorCount = 1;
     writes[11].pBufferInfo = &lightBufferInfo;
 
+    // Emissive light buffer (binding 12)
+    writes[12].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[12].dstSet = m_descriptorSet;
+    writes[12].dstBinding = 12;
+    writes[12].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[12].descriptorCount = 1;
+    writes[12].pBufferInfo = &emissiveBufferInfo;
+
     m_devFuncs->vkUpdateDescriptorSets(dev, writes.size(), writes.data(), 0, nullptr);
 }
 
 void RayRenderer::createComputePipeline() {
     VkDevice dev = m_window->device();
 
-    // Descriptor set layout (12 bindings: output image, 4 buffers, accum image, 4 CSG buffers, materials, lights)
-    std::array<VkDescriptorSetLayoutBinding, 12> bindings{};
+    // Descriptor set layout (13 bindings: output image, 4 buffers, accum image, 4 CSG buffers, materials, lights, emissive)
+    std::array<VkDescriptorSetLayoutBinding, 13> bindings{};
 
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -610,6 +641,12 @@ void RayRenderer::createComputePipeline() {
     bindings[11].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[11].descriptorCount = 1;
     bindings[11].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    // Emissive light buffer (binding 12)
+    bindings[12].binding = 12;
+    bindings[12].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[12].descriptorCount = 1;
+    bindings[12].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -700,6 +737,7 @@ void RayRenderer::recordComputeCommands(VkCommandBuffer cmdBuf) {
     pc.floorEnabled = m_floor.enabled ? 1 : 0;
     pc.floorY = m_floor.y;
     pc.floorMaterialId = m_materials.find(m_floor.materialName);
+    pc.numEmissiveLights = m_lights.emissiveCount();
 
     m_devFuncs->vkCmdPushConstants(cmdBuf, m_pipelineLayout,
         VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RayPushConstants), &pc);
@@ -806,6 +844,57 @@ void RayRenderer::createLightBuffer() {
         m_devFuncs->vkMapMemory(dev, m_lightBufferMemory, 0, lightSize, 0, &data);
         memcpy(data, lights.data(), lights.size() * sizeof(Light));
         m_devFuncs->vkUnmapMemory(dev, m_lightBufferMemory);
+    }
+}
+
+void RayRenderer::createEmissiveLightBuffer() {
+    VkDevice dev = m_window->device();
+
+    const auto& emissive = m_lights.emissiveBuffer();
+    size_t bufSize = std::max(emissive.size() * sizeof(parametric::EmissiveLight), size_t(32));
+
+    createBuffer(bufSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 m_emissiveLightBuffer, m_emissiveLightBufferMemory);
+
+    if (!emissive.empty()) {
+        void* data;
+        m_devFuncs->vkMapMemory(dev, m_emissiveLightBufferMemory, 0, bufSize, 0, &data);
+        memcpy(data, emissive.data(), emissive.size() * sizeof(parametric::EmissiveLight));
+        m_devFuncs->vkUnmapMemory(dev, m_emissiveLightBufferMemory);
+    }
+}
+
+void RayRenderer::findEmissiveLights() {
+    // Scan CSG roots for emissive materials
+    // For now, only support single-primitive roots (not CSG combinations)
+    const auto& nodes = m_csgScene.nodes();
+    const auto& roots = m_csgScene.roots();
+    const auto& mats = m_materials.materials();
+
+    m_lights.emissiveLights.clear();
+
+    for (uint32_t rootIdx : roots) {
+        const auto& node = nodes[rootIdx];
+
+        // Only support primitive nodes for now
+        if (node.type != static_cast<uint32_t>(parametric::CSGNodeType::Primitive)) {
+            continue;
+        }
+
+        // Check if material is emissive
+        if (node.materialId >= mats.size()) continue;
+        const auto& mat = mats[node.materialId];
+
+        if (mat.type == static_cast<uint32_t>(parametric::MaterialType::Emissive) &&
+            mat.emissive > 0.0f) {
+            // Found an emissive primitive
+            parametric::EmissiveLight light;
+            light.primitiveIndex = node.left;  // For primitive nodes, left = prim index
+            light.nodeIndex = rootIdx;
+            light.area = m_csgScene.computePrimitiveSurfaceArea(node.left);
+            m_lights.emissiveLights.push_back(light);
+        }
     }
 }
 

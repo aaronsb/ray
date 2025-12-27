@@ -50,6 +50,7 @@ layout(push_constant) uniform PushConstants {
     uint floorEnabled;       // Scene-defined floor
     float floorY;            // Floor Y position
     uint floorMaterialId;    // Floor material index
+    uint numEmissiveLights;  // Number of emissive area lights
 } pc;
 
 // Patch control points: 16 vec4s per patch (w unused, for alignment)
@@ -153,6 +154,18 @@ struct Light {
 
 layout(std430, set = 0, binding = 11) readonly buffer LightBuffer {
     Light lights[];     // lights[0] is always the sun
+};
+
+// Emissive area light (from CSG primitive with emissive material)
+struct EmissiveLight {
+    uint primitiveIndex;  // Index into CSGPrimitive buffer
+    uint nodeIndex;       // Index into CSGNode buffer (for material lookup)
+    float area;           // Surface area for PDF calculation
+    float _pad;
+};
+
+layout(std430, set = 0, binding = 12) readonly buffer EmissiveLightBuffer {
+    EmissiveLight emissiveLights[];
 };
 
 // Light type constants

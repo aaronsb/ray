@@ -88,6 +88,9 @@ public:
     // Compute AABB for a primitive
     AABB computePrimitiveAABB(uint32_t primIndex) const;
 
+    // Compute surface area for a primitive (for light sampling PDF)
+    float computePrimitiveSurfaceArea(uint32_t primIndex) const;
+
     // Compute AABB for a CSG node (recursive through tree)
     AABB computeNodeAABB(uint32_t nodeIndex) const;
 
@@ -235,6 +238,39 @@ inline AABB CSGScene::computePrimitiveAABB(uint32_t primIndex) const {
         }
     }
     return AABB();
+}
+
+inline float CSGScene::computePrimitiveSurfaceArea(uint32_t primIndex) const {
+    const CSGPrimitive& p = m_primitives[primIndex];
+    constexpr float PI = 3.14159265358979323846f;
+
+    switch (static_cast<CSGPrimType>(p.type)) {
+        case CSGPrimType::Sphere: {
+            float r = p.param0;
+            return 4.0f * PI * r * r;
+        }
+        case CSGPrimType::Box: {
+            float hx = p.param0, hy = p.param1, hz = p.param2;
+            // Surface area = 2(wh + hd + dw) where w=2*hx, h=2*hy, d=2*hz
+            return 8.0f * (hx*hy + hy*hz + hz*hx);
+        }
+        case CSGPrimType::Cylinder: {
+            float r = p.param0, h = p.param1;
+            // Two caps + lateral surface
+            return 2.0f * PI * r * r + 2.0f * PI * r * h;
+        }
+        case CSGPrimType::Cone: {
+            float r = p.param0, h = p.param1;
+            // Base + lateral surface
+            float slant = std::sqrt(r*r + h*h);
+            return PI * r * r + PI * r * slant;
+        }
+        case CSGPrimType::Torus: {
+            float R = p.param0, rr = p.param1;
+            return 4.0f * PI * PI * R * rr;
+        }
+    }
+    return 1.0f;  // Fallback
 }
 
 inline AABB CSGScene::computeNodeAABB(uint32_t nodeIndex) const {

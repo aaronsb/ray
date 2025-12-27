@@ -50,7 +50,7 @@ struct RayPushConstants {
     uint32_t floorEnabled;
     float floorY;
     uint32_t floorMaterialId;
-    float _pad;  // Alignment padding
+    uint32_t numEmissiveLights;
 };
 
 // Simple orbit camera
@@ -192,6 +192,10 @@ private:
     VkBuffer m_lightBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_lightBufferMemory = VK_NULL_HANDLE;
 
+    // Emissive light buffer (area lights from CSG primitives)
+    VkBuffer m_emissiveLightBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_emissiveLightBufferMemory = VK_NULL_HANDLE;
+
     // Frame tracking
     uint32_t m_frameIndex = 0;
     bool m_needsImageTransition = true;
@@ -206,6 +210,7 @@ private:
     void createCSGBuffers();
     void createMaterialBuffer();
     void createLightBuffer();
+    void createEmissiveLightBuffer();
     void createDescriptorSet();
     void createComputePipeline();
     void recordComputeCommands(VkCommandBuffer cmdBuf);
@@ -214,6 +219,7 @@ private:
     void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
                       VkMemoryPropertyFlags properties, VkBuffer& buffer,
                       VkDeviceMemory& memory);
+    void findEmissiveLights();  // Scan CSG roots for emissive materials
     void createImage(uint32_t width, uint32_t height, VkFormat format,
                      VkImageUsageFlags usage, VkImage& image, VkDeviceMemory& memory);
     VkImageView createImageView(VkImage image, VkFormat format);

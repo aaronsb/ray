@@ -53,11 +53,21 @@ struct SunLight {
     }
 };
 
+// Emissive area light (from CSG primitive with emissive material)
+// GPU-compatible structure (16 bytes)
+struct alignas(16) EmissiveLight {
+    uint32_t primitiveIndex;  // Index into CSGPrimitive buffer
+    uint32_t nodeIndex;       // Index into CSGNode buffer (for material lookup)
+    float area;               // Surface area for PDF calculation
+    float _pad;
+};
+
 // Light collection for a scene
 class LightList {
 public:
     SunLight sun;
     std::vector<Light> pointLights;
+    std::vector<EmissiveLight> emissiveLights;
 
     // Build complete light buffer (sun first, then point lights)
     std::vector<Light> buildBuffer() const {
@@ -67,8 +77,14 @@ public:
         return result;
     }
 
+    // Build emissive light buffer
+    const std::vector<EmissiveLight>& emissiveBuffer() const {
+        return emissiveLights;
+    }
+
     uint32_t sunCount() const { return 1; }
     uint32_t pointLightCount() const { return static_cast<uint32_t>(pointLights.size()); }
+    uint32_t emissiveCount() const { return static_cast<uint32_t>(emissiveLights.size()); }
     uint32_t totalCount() const { return sunCount() + pointLightCount(); }
 
     // Get sun angular radius for disc rendering
