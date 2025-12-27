@@ -21,8 +21,7 @@ layout(local_size_x = 16, local_size_y = 16) in;
 #define FEATURE_AREA_LIGHTS     1   // Direct sampling of emissive surfaces (soft shadows)
 #define FEATURE_POINT_LIGHTS    1   // Point light sources with distance falloff
 #define FEATURE_FIREFLY_CLAMP   1   // Clamp bright outliers in early frames
-#define FEATURE_DIFFUSE_BOUNCE  1   // Multi-bounce GI (diffuse surfaces bounce instead of terminate)
-#define FEATURE_GAUSSIAN_GI     1   // Gaussian-based GI (replaces stochastic bounces in Draft mode)
+#define FEATURE_GAUSSIAN_GI     1   // Gaussian-based GI (replaces stochastic path tracing for diffuse)
 
 #ifndef MAX_BOUNCES
 #define MAX_BOUNCES             4   // Max ray depth (2-4 typical for interactive, higher for quality)
@@ -73,13 +72,12 @@ layout(push_constant) uniform PushConstants {
     uint _pad2, _pad3;
 } pc;
 
-// Quality-dependent max bounces
-// All levels need enough bounces for glass refraction (4+)
-// The difference is whether diffuse surfaces bounce (GI) or terminate
+// Quality-dependent max bounces (for glass/metal reflections)
+// Diffuse GI handled by Gaussians, so this only affects specular paths
 int getMaxBounces() {
-    if (pc.qualityLevel == 0) return 4;       // Draft: glass works, no diffuse GI
-    else if (pc.qualityLevel == 1) return 5;  // Preview: glass + some GI
-    else return 6;                             // Final: full GI
+    if (pc.qualityLevel == 0) return 3;       // Draft: basic reflections
+    else if (pc.qualityLevel == 1) return 5;  // Preview: good glass
+    else return 8;                             // Final: deep reflections/refractions
 }
 
 // Helper to get background color as vec3
@@ -1132,21 +1130,13 @@ void main() {
 #if FEATURE_POINT_LIGHTS
             extraLight += evaluatePointLights(hitPoint, normal, baseColor);
 #endif
-#if FEATURE_DIFFUSE_BOUNCE
-            // Quality >= 1 (Preview/Final): bounce for GI
-            if (pc.qualityLevel >= 1) {
-                color += throughput * (diffuse + extraLight);
-                throughput *= baseColor;
-                ray.origin = hitPoint + normal * EPSILON * 2.0;
-                ray.direction = cosineWeightedHemisphere(normal);
-                continue;
-            }
-#endif
 #if FEATURE_GAUSSIAN_GI
-            // Draft mode: use Gaussian GI instead of stochastic bounces
+            // Gaussian GI for indirect lighting (deterministic, noise-free)
             vec3 gaussianIndirect = queryGaussianGI(hitPoint, normal, baseColor);
             color += throughput * (diffuse + extraLight + gaussianIndirect);
 #else
+            // Fallback: ambient approximation
+            vec3 ambient = baseColor * pc.skyAmbient;
             color += throughput * (ambient + diffuse + extraLight);
 #endif
             terminated = true;

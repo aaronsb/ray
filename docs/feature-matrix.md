@@ -28,6 +28,7 @@ Which material types work on which geometry:
 | **Point Lights** | Omnidirectional with inverse-square falloff | ✓ Implemented |
 | **Spot Lights** | Cone lights with inner/outer angle falloff | ✓ Implemented |
 | **Gobo Patterns** | Procedural spotlight masks (bars, grid, dots, radial, noise) | ✓ Implemented |
+| **Gaussian GI** | Deterministic indirect lighting via Gaussian radiance field | ✓ Implemented |
 
 ### Historical Features (Removed)
 
@@ -38,6 +39,7 @@ Features that existed in earlier versions but were removed during the clean-slat
 | **Day/Night Cycle** | Sun position-based twilight transitions | Simplified to always-day |
 | **Star Field** | Procedural stars at night | Removed with day/night |
 | **NEE Sphere Lights** | Hardcoded emissive sphere sampling | Replaced by area lights |
+| **Stochastic Diffuse GI** | Multi-bounce path tracing for diffuse | Replaced by Gaussian GI |
 
 ## Shadow Coverage
 
@@ -115,20 +117,24 @@ Who casts shadows on whom:
 
 ## Performance vs Quality Tradeoffs
 
-Current compile-time flags that affect performance:
+### Runtime Quality Presets (1/2/3 keys)
+
+| Preset | Bounces | Use Case |
+|--------|---------|----------|
+| Draft (1) | 3 | Fast preview, basic reflections |
+| Preview (2) | 5 | Good glass rendering |
+| Final (3) | 8 | Deep reflections/refractions |
+
+Diffuse GI is handled by Gaussians at all quality levels (deterministic, noise-free).
+
+### Compile-time Feature Flags
 
 | Flag | Off (Fast) | On (Quality) |
 |------|------------|--------------|
-| `FEATURE_DIFFUSE_BOUNCE` | Single bounce + ambient hack | Multi-bounce GI, stochastic termination |
+| `FEATURE_GAUSSIAN_GI` | Ambient hack | Gaussian-based indirect lighting |
 | `FEATURE_AREA_LIGHTS` | No soft shadows from emissives | Soft shadows, more rays per pixel |
 | `FEATURE_ROUGHNESS` | Perfect mirrors only | GGX microfacet (more expensive) |
 | `FEATURE_SHADOWS` | No shadow rays | Shadow testing on diffuse hits |
-| `MAX_BOUNCES` | Lower = faster | Higher = better glass/GI |
-
-**Potential future improvements:**
-- Runtime quality presets (draft/preview/final)
-- Adaptive quality based on camera motion
-- Per-material quality hints
 
 ## Future Considerations
 
