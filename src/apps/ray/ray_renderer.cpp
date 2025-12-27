@@ -73,6 +73,18 @@ void RayRenderer::initResources() {
                 printf("  Emissive:   %u area lights\n", m_lights.emissiveCount());
             }
 
+            // Build GI Gaussians from CSG primitives
+            m_giGaussians.placeOnCSG(m_csgScene, m_materials);
+            if (m_giGaussians.count() > 0) {
+                // Compute direct lighting for Gaussians
+                m_giGaussians.computeDirectLighting(m_lights.sun,
+                                                     m_lights.pointLights,
+                                                     m_lights.spotLights);
+                // Propagate light between Gaussians (radiosity)
+                m_giGaussians.propagate(3);
+                printf("  GI Gauss:   %u gaussians\n", m_giGaussians.count());
+            }
+
             sceneLoaded = true;
         } else {
             fprintf(stderr, "Failed to parse scene file: %s\n", qPrintable(m_scenePath));
@@ -245,6 +257,16 @@ void RayRenderer::releaseResources() {
         m_devFuncs->vkFreeMemory(dev, m_emissiveLightBufferMemory, nullptr);
         m_emissiveLightBufferMemory = VK_NULL_HANDLE;
     }
+
+    // Gaussian buffer
+    if (m_gaussianBuffer) {
+        m_devFuncs->vkDestroyBuffer(dev, m_gaussianBuffer, nullptr);
+        m_gaussianBuffer = VK_NULL_HANDLE;
+    }
+    if (m_gaussianBufferMemory) {
+        m_devFuncs->vkFreeMemory(dev, m_gaussianBufferMemory, nullptr);
+        m_gaussianBufferMemory = VK_NULL_HANDLE;
+    }
 }
 
 void RayRenderer::startNextFrame() {
@@ -385,15 +407,16 @@ void RayRenderer::createPatchBuffers() {
     createMaterialBuffer();
     createLightBuffer();
     createEmissiveLightBuffer();
+    createGaussianBuffer();
 }
 
 void RayRenderer::createDescriptorSet() {
     VkDevice dev = m_window->device();
 
-    // Create descriptor pool (2 images + 11 buffers)
+    // Create descriptor pool (2 images + 12 buffers)
     std::array<VkDescriptorPoolSize, 2> poolSizes{};
     poolSizes[0] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2};  // output + accumulation
-    poolSizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 11};  // patches, BVH, indices, instances, CSG prims/nodes/roots/bvh, materials, lights, emissive
+    poolSizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 12};  // patches, BVH, indices, instances, CSG prims/nodes/roots/bvh, materials, lights, emissive, gaussians
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -480,7 +503,12 @@ void RayRenderer::createDescriptorSet() {
     emissiveBufferInfo.offset = 0;
     emissiveBufferInfo.range = VK_WHOLE_SIZE;
 
-    std::array<VkWriteDescriptorSet, 13> writes{};
+    VkDescriptorBufferInfo gaussianBufferInfo{};
+    gaussianBufferInfo.buffer = m_gaussianBuffer;
+    gaussianBufferInfo.offset = 0;
+    gaussianBufferInfo.range = VK_WHOLE_SIZE;
+
+    std::array<VkWriteDescriptorSet, 14> writes{};
 
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[0].dstSet = m_descriptorSet;
@@ -578,14 +606,22 @@ void RayRenderer::createDescriptorSet() {
     writes[12].descriptorCount = 1;
     writes[12].pBufferInfo = &emissiveBufferInfo;
 
+    // GI Gaussian buffer (binding 13)
+    writes[13].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[13].dstSet = m_descriptorSet;
+    writes[13].dstBinding = 13;
+    writes[13].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[13].descriptorCount = 1;
+    writes[13].pBufferInfo = &gaussianBufferInfo;
+
     m_devFuncs->vkUpdateDescriptorSets(dev, writes.size(), writes.data(), 0, nullptr);
 }
 
 void RayRenderer::createComputePipeline() {
     VkDevice dev = m_window->device();
 
-    // Descriptor set layout (13 bindings: output image, 4 buffers, accum image, 4 CSG buffers, materials, lights, emissive)
-    std::array<VkDescriptorSetLayoutBinding, 13> bindings{};
+    // Descriptor set layout (14 bindings: output image, 4 buffers, accum image, 4 CSG buffers, materials, lights, emissive, gaussians)
+    std::array<VkDescriptorSetLayoutBinding, 14> bindings{};
 
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -656,6 +692,12 @@ void RayRenderer::createComputePipeline() {
     bindings[12].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[12].descriptorCount = 1;
     bindings[12].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    // GI Gaussian buffer (binding 13)
+    bindings[13].binding = 13;
+    bindings[13].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[13].descriptorCount = 1;
+    bindings[13].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -753,6 +795,7 @@ void RayRenderer::recordComputeCommands(VkCommandBuffer cmdBuf) {
     pc.bgB = m_background.b;
     pc.skyAmbient = m_lights.skyAmbient();
     pc.qualityLevel = m_qualityLevel;
+    pc.numGaussians = m_giGaussians.count();
 
     m_devFuncs->vkCmdPushConstants(cmdBuf, m_pipelineLayout,
         VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RayPushConstants), &pc);
@@ -910,6 +953,24 @@ void RayRenderer::findEmissiveLights() {
             light.area = m_csgScene.computePrimitiveSurfaceArea(node.left);
             m_lights.emissiveLights.push_back(light);
         }
+    }
+}
+
+void RayRenderer::createGaussianBuffer() {
+    VkDevice dev = m_window->device();
+
+    const auto& gaussians = m_giGaussians.gaussians();
+    size_t bufSize = std::max(gaussians.size() * sizeof(GIGaussian), size_t(48));
+
+    createBuffer(bufSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 m_gaussianBuffer, m_gaussianBufferMemory);
+
+    if (!gaussians.empty()) {
+        void* data;
+        m_devFuncs->vkMapMemory(dev, m_gaussianBufferMemory, 0, bufSize, 0, &data);
+        memcpy(data, gaussians.data(), gaussians.size() * sizeof(GIGaussian));
+        m_devFuncs->vkUnmapMemory(dev, m_gaussianBufferMemory);
     }
 }
 

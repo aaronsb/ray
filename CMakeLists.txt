@@ -101,6 +101,7 @@ endfunction()
 add_demo(ray ${CMAKE_SOURCE_DIR}/src/apps/ray
     src/apps/ray/main.cpp
     src/apps/ray/ray_renderer.cpp
+    src/parametric/gi/gi_gaussian.cpp
 )
 
 # ============ CLI TOOLS ============

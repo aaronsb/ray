@@ -22,6 +22,7 @@ layout(local_size_x = 16, local_size_y = 16) in;
 #define FEATURE_POINT_LIGHTS    1   // Point light sources with distance falloff
 #define FEATURE_FIREFLY_CLAMP   1   // Clamp bright outliers in early frames
 #define FEATURE_DIFFUSE_BOUNCE  1   // Multi-bounce GI (diffuse surfaces bounce instead of terminate)
+#define FEATURE_GAUSSIAN_GI     1   // Gaussian-based GI (replaces stochastic bounces in Draft mode)
 
 #ifndef MAX_BOUNCES
 #define MAX_BOUNCES             4   // Max ray depth (2-4 typical for interactive, higher for quality)
@@ -68,7 +69,8 @@ layout(push_constant) uniform PushConstants {
     float skyAmbient;        // Sky ambient contribution (0 = no ambient)
     // Row 7: 16 bytes
     uint qualityLevel;       // 0=Draft, 1=Preview, 2=Final
-    uint _pad1, _pad2, _pad3;
+    uint numGaussians;       // GI Gaussians count
+    uint _pad2, _pad3;
 } pc;
 
 // Quality-dependent max bounces
@@ -199,6 +201,66 @@ struct EmissiveLight {
 layout(std430, set = 0, binding = 12) readonly buffer EmissiveLightBuffer {
     EmissiveLight emissiveLights[];
 };
+
+// GI Gaussian (must match CPU struct - 48 bytes)
+struct GIGaussian {
+    vec3 position;      // 12 bytes
+    float radius;       // 4 bytes
+    vec3 normal;        // 12 bytes
+    float emission;     // 4 bytes
+    vec3 radiance;      // 12 bytes
+    uint albedoPacked;  // 4 bytes
+};
+
+layout(std430, set = 0, binding = 13) readonly buffer GaussianBuffer {
+    GIGaussian gaussians[];
+};
+
+#if FEATURE_GAUSSIAN_GI
+// Query Gaussian field for indirect illumination
+vec3 queryGaussianGI(vec3 p, vec3 n, vec3 albedo) {
+    if (pc.numGaussians == 0) return vec3(0.0);
+
+    vec3 indirect = vec3(0.0);
+    float totalWeight = 0.0;
+
+    for (uint i = 0; i < pc.numGaussians; i++) {
+        GIGaussian g = gaussians[i];
+
+        vec3 toG = g.position - p;
+        float dist2 = dot(toG, toG);
+        float dist = sqrt(dist2);
+
+        if (dist < 0.01) continue;  // Skip self
+
+        vec3 dir = toG / dist;
+
+        // Gaussian spatial falloff
+        float sigma = g.radius;
+        float spatial = exp(-dist2 / (2.0 * sigma * sigma));
+
+        // Hemisphere visibility (receiver normal)
+        float cosReceiver = max(0.0, dot(n, dir));
+
+        // Emitter orientation (Gaussian radiates in its normal hemisphere)
+        float cosEmitter = max(0.0, dot(g.normal, -dir));
+
+        // Combined weight with distance attenuation
+        float weight = spatial * cosReceiver * cosEmitter;
+        weight /= (1.0 + dist2 * 0.1);
+
+        indirect += g.radiance * weight;
+        totalWeight += weight;
+    }
+
+    // Normalize and apply surface BRDF
+    if (totalWeight > 0.001) {
+        indirect /= totalWeight;
+    }
+
+    return (albedo / 3.14159265359) * indirect;
+}
+#endif
 
 // Light type constants
 #define LIGHT_DIRECTIONAL  0
@@ -1080,7 +1142,13 @@ void main() {
                 continue;
             }
 #endif
+#if FEATURE_GAUSSIAN_GI
+            // Draft mode: use Gaussian GI instead of stochastic bounces
+            vec3 gaussianIndirect = queryGaussianGI(hitPoint, normal, baseColor);
+            color += throughput * (diffuse + extraLight + gaussianIndirect);
+#else
             color += throughput * (ambient + diffuse + extraLight);
+#endif
             terminated = true;
             break;
         }

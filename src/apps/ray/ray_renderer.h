@@ -13,6 +13,7 @@
 #include "../../parametric/materials/material.h"
 #include "../../parametric/lights/lights.h"
 #include "../../parametric/scene/scene_loader.h"
+#include "../../parametric/gi/gi_gaussian.h"
 
 using parametric::BezierInstance;
 using parametric::BezierPatchGroup;
@@ -30,6 +31,8 @@ using parametric::Light;
 using parametric::LightList;
 using parametric::FloorSettings;
 using parametric::BackgroundSettings;
+using parametric::GIGaussian;
+using parametric::GIGaussianField;
 
 // Push constants matching ray.comp
 // Push constants - 128 bytes (aligned to 16)
@@ -66,7 +69,8 @@ struct RayPushConstants {
     float skyAmbient;
     // Row 7: 16 bytes
     uint32_t qualityLevel;  // 0=Draft, 1=Preview, 2=Final
-    uint32_t _pad1, _pad2, _pad3;
+    uint32_t numGaussians;  // GI Gaussians count
+    uint32_t _pad2, _pad3;
 };
 
 // Simple orbit camera
@@ -166,6 +170,9 @@ private:
     // Background settings
     BackgroundSettings m_background;
 
+    // GI Gaussians
+    GIGaussianField m_giGaussians;
+
     // Vulkan resources
     VkPipeline m_computePipeline = VK_NULL_HANDLE;
     VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
@@ -221,6 +228,10 @@ private:
     VkBuffer m_emissiveLightBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_emissiveLightBufferMemory = VK_NULL_HANDLE;
 
+    // GI Gaussian buffer
+    VkBuffer m_gaussianBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_gaussianBufferMemory = VK_NULL_HANDLE;
+
     // Frame tracking
     uint32_t m_frameIndex = 0;
     uint32_t m_qualityLevel = 2;  // 0=Draft, 1=Preview, 2=Final (default)
@@ -237,6 +248,7 @@ private:
     void createMaterialBuffer();
     void createLightBuffer();
     void createEmissiveLightBuffer();
+    void createGaussianBuffer();
     void createDescriptorSet();
     void createComputePipeline();
     void recordComputeCommands(VkCommandBuffer cmdBuf);
