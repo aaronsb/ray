@@ -20,6 +20,7 @@ layout(local_size_x = 16, local_size_y = 16) in;
 #define FEATURE_CSG             1   // Interval-based CSG (analytic, exact edges)
 #define FEATURE_AREA_LIGHTS     1   // Direct sampling of emissive surfaces (soft shadows)
 #define FEATURE_POINT_LIGHTS    1   // Point light sources with distance falloff
+#define FEATURE_FIREFLY_CLAMP   1   // Clamp bright outliers in early frames
 
 #ifndef MAX_BOUNCES
 #define MAX_BOUNCES             4   // Max ray depth (4-8 typical)
@@ -1107,6 +1108,17 @@ void main() {
     if (any(isnan(color)) || any(isinf(color))) {
         color = vec3(0.0);  // Discard invalid samples
     }
+
+#if FEATURE_FIREFLY_CLAMP
+    // Clamp fireflies (bright outlier pixels) - more aggressive in early frames
+    // Luminance-preserving clamp: scale color if too bright rather than hard clip
+    float luminance = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    // Adaptive threshold: tight for first few frames, relaxes as samples accumulate
+    float maxLum = (pc.frameIndex < 8) ? 4.0 : 10.0 + float(pc.frameIndex) * 0.5;
+    if (luminance > maxLum) {
+        color *= maxLum / luminance;
+    }
+#endif
 
     // Accumulation blending (in linear space, before gamma)
 #if FEATURE_ACCUMULATION
