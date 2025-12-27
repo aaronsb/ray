@@ -36,7 +36,7 @@
 ; Cube is 2x2x2, centered at y=1.5 (half height = 1, so bottom at y=0.5)
 ; ============================================================================
 (shape (box (at -4 1.5 -2) (half 1.0 1.0 1.0)) glass)
-(shape (torus (at -4 1.5 -2) (R 0.6) (r 0.2)) bronze)
+(shape (torus (at -4 1.5 -2) (R 0.6) (r 0.2) (rotate 90 0 0)) bronze)
 
 ; ============================================================================
 ; Glass cylinder - creates line caustic

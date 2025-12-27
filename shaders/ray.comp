@@ -214,6 +214,16 @@ layout(std430, set = 0, binding = 13) readonly buffer GaussianBuffer {
     GIGaussian gaussians[];
 };
 
+// CSG Transform - 16 bytes (matches C++ CSGTransform)
+struct CSGTransform {
+    float rotX, rotY, rotZ;  // Euler angles (radians), XYZ order
+    float scale;             // Uniform scale
+};
+
+layout(std430, set = 0, binding = 14) readonly buffer CSGTransformBuffer {
+    CSGTransform csgTransforms[];
+};
+
 #if FEATURE_GAUSSIAN_GI
 // Query Gaussian field for indirect illumination
 vec3 queryGaussianGI(vec3 p, vec3 n, vec3 albedo) {
@@ -341,25 +351,78 @@ vec3 evaluatePointLights(vec3 hitPoint, vec3 normal, vec3 albedo);
 #if FEATURE_CSG
 #include "includes/csg.glsl"
 
+// Build rotation matrix from Euler angles (XYZ order)
+mat3 buildRotationMatrix(float rx, float ry, float rz) {
+    float cx = cos(rx), sx = sin(rx);
+    float cy = cos(ry), sy = sin(ry);
+    float cz = cos(rz), sz = sin(rz);
+
+    // Rotation order: Z * Y * X (applied to column vector)
+    return mat3(
+        cy*cz, sx*sy*cz + cx*sz, -cx*sy*cz + sx*sz,
+        -cy*sz, -sx*sy*sz + cx*cz, cx*sy*sz + sx*cz,
+        sy, -sx*cy, cx*cy
+    );
+}
+
 // Get interval for a CSG primitive by index
 Interval getPrimitiveInterval(vec3 ro, vec3 rd, uint primIndex) {
     CSGPrimitive prim = csgPrimitives[primIndex];
+    CSGTransform xform = csgTransforms[primIndex];
     vec3 center = vec3(prim.x, prim.y, prim.z);
 
+    // Check if we have any transform to apply
+    bool hasRotation = (xform.rotX != 0.0 || xform.rotY != 0.0 || xform.rotZ != 0.0);
+    bool hasScale = (xform.scale != 1.0);
+    mat3 rot = mat3(1.0);
+
+    // Apply inverse transform to ray (transform ray into object local space)
+    // Inverse order: translate, then inverse rotate, then inverse scale
+    vec3 ro_local = ro - center;
+    vec3 rd_local = rd;
+
+    if (hasRotation) {
+        rot = buildRotationMatrix(xform.rotX, xform.rotY, xform.rotZ);
+        mat3 invRot = transpose(rot);  // Inverse of rotation = transpose
+        ro_local = invRot * ro_local;
+        rd_local = invRot * rd_local;
+    }
+
+    if (hasScale) {
+        float invScale = 1.0 / xform.scale;
+        ro_local *= invScale;
+        rd_local *= invScale;
+    }
+
+    // Intersect in local space (primitive centered at origin)
+    Interval result;
     switch (prim.type) {
         case CSG_PRIM_SPHERE:
-            return raySphere(ro, rd, center, prim.param0);
+            result = raySphere(ro_local, rd_local, vec3(0.0), prim.param0);
+            break;
         case CSG_PRIM_BOX:
-            return rayBox(ro, rd, center, vec3(prim.param0, prim.param1, prim.param2));
+            result = rayBox(ro_local, rd_local, vec3(0.0), vec3(prim.param0, prim.param1, prim.param2));
+            break;
         case CSG_PRIM_CYLINDER:
-            return rayCylinder(ro, rd, center, prim.param0, prim.param1);
+            result = rayCylinder(ro_local, rd_local, vec3(0.0), prim.param0, prim.param1);
+            break;
         case CSG_PRIM_CONE:
-            return rayCone(ro, rd, center, prim.param0, prim.param1);
+            result = rayCone(ro_local, rd_local, vec3(0.0), prim.param0, prim.param1);
+            break;
         case CSG_PRIM_TORUS:
-            return rayTorus(ro, rd, center, prim.param0, prim.param1);
+            result = rayTorus(ro_local, rd_local, vec3(0.0), prim.param0, prim.param1);
+            break;
         default:
             return EMPTY_INTERVAL;
     }
+
+    // Transform normals back to world space
+    if (hasRotation && !isEmpty(result)) {
+        result.nEnter = normalize(rot * result.nEnter);
+        result.nExit = normalize(rot * result.nExit);
+    }
+
+    return result;
 }
 
 // Stack-based CSG tree evaluation using iterative post-order traversal

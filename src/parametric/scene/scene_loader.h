@@ -541,12 +541,14 @@ private:
             auto [x, y, z] = getCenter(expr);
             float r = getFloat(expr, "r", "radius");
             uint32_t prim = data_.csg.addSphere(x, y, z, r);
+            applyTransform(expr, prim);
             return data_.csg.addPrimitiveNode(prim, matId);
         }
         if (type == "box") {
             auto [x, y, z] = getCenter(expr);
             auto [hx, hy, hz] = getVec3(expr, "half", "size");
             uint32_t prim = data_.csg.addBox(x, y, z, hx, hy, hz);
+            applyTransform(expr, prim);
             return data_.csg.addPrimitiveNode(prim, matId);
         }
         if (type == "cylinder") {
@@ -554,6 +556,7 @@ private:
             float r = getFloat(expr, "r", "radius");
             float h = getFloat(expr, "h", "height");
             uint32_t prim = data_.csg.addCylinder(x, y, z, r, h);
+            applyTransform(expr, prim);
             return data_.csg.addPrimitiveNode(prim, matId);
         }
         if (type == "cone") {
@@ -561,6 +564,7 @@ private:
             float r = getFloat(expr, "r", "radius");
             float h = getFloat(expr, "h", "height");
             uint32_t prim = data_.csg.addCone(x, y, z, r, h);
+            applyTransform(expr, prim);
             return data_.csg.addPrimitiveNode(prim, matId);
         }
         if (type == "torus") {
@@ -568,6 +572,7 @@ private:
             float major = getFloat(expr, "major", "R");
             float minor = getFloat(expr, "minor", "r");
             uint32_t prim = data_.csg.addTorus(x, y, z, major, minor);
+            applyTransform(expr, prim);
             return data_.csg.addPrimitiveNode(prim, matId);
         }
 
@@ -631,6 +636,31 @@ private:
             }
         }
         throw std::runtime_error("Missing required property: " + key);
+    }
+
+    // Apply optional (rotate X Y Z) and (scale S) to a primitive
+    void applyTransform(const SExp& expr, uint32_t primIndex) {
+        float rotX = 0, rotY = 0, rotZ = 0;
+        float scale = 1.0f;
+        const float DEG2RAD = 3.14159265f / 180.0f;
+
+        for (size_t i = 1; i < expr.size(); i++) {
+            if (!expr[i].isList() || expr[i].size() == 0) continue;
+            const std::string& key = expr[i].head();
+
+            if (key == "rotate" && expr[i].size() >= 4) {
+                rotX = static_cast<float>(expr[i][1].asNumber()) * DEG2RAD;
+                rotY = static_cast<float>(expr[i][2].asNumber()) * DEG2RAD;
+                rotZ = static_cast<float>(expr[i][3].asNumber()) * DEG2RAD;
+            } else if (key == "scale" && expr[i].size() >= 2) {
+                scale = static_cast<float>(expr[i][1].asNumber());
+            }
+        }
+
+        // Only set if non-identity
+        if (rotX != 0 || rotY != 0 || rotZ != 0 || scale != 1.0f) {
+            data_.csg.setTransform(primIndex, rotX, rotY, rotZ, scale);
+        }
     }
 
     std::tuple<float, float, float> getVec3(const SExp& expr, const std::string& key, const std::string& altKey = "") {

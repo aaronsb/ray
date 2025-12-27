@@ -22,6 +22,7 @@ using parametric::SubPatch;
 using parametric::BVHNode;
 using parametric::CSGScene;
 using parametric::CSGPrimitive;
+using parametric::CSGTransform;
 using parametric::CSGNode;
 using parametric::Material;
 using parametric::MaterialLibrary;
@@ -222,6 +223,8 @@ private:
     VkDeviceMemory m_csgRootBufferMemory = VK_NULL_HANDLE;
     VkBuffer m_csgBVHBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_csgBVHBufferMemory = VK_NULL_HANDLE;
+    VkBuffer m_csgTransformBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_csgTransformBufferMemory = VK_NULL_HANDLE;
 
     // Material buffer
     VkBuffer m_materialBuffer = VK_NULL_HANDLE;

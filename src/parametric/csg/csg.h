@@ -38,6 +38,13 @@ struct alignas(16) CSGPrimitive {
     float _pad;
 };
 
+// GPU CSG Transform - 16 bytes
+// Separate buffer for runtime manipulation (animation, interactivity)
+struct alignas(16) CSGTransform {
+    float rotX, rotY, rotZ;  // Euler angles (radians), applied in XYZ order
+    float scale;             // Uniform scale (1.0 = no scale)
+};
+
 // GPU CSG Node - 16 bytes
 // Tree node: either a primitive reference or a boolean operation
 struct alignas(16) CSGNode {
@@ -78,12 +85,17 @@ public:
 
     // Data accessors for GPU upload
     const std::vector<CSGPrimitive>& primitives() const { return m_primitives; }
+    const std::vector<CSGTransform>& transforms() const { return m_transforms; }
     const std::vector<CSGNode>& nodes() const { return m_nodes; }
     const std::vector<uint32_t>& roots() const { return m_roots; }
 
     uint32_t primitiveCount() const { return static_cast<uint32_t>(m_primitives.size()); }
     uint32_t nodeCount() const { return static_cast<uint32_t>(m_nodes.size()); }
     uint32_t rootCount() const { return static_cast<uint32_t>(m_roots.size()); }
+
+    // Transform manipulation (for animation/interactivity)
+    void setTransform(uint32_t primIndex, float rotX, float rotY, float rotZ, float scale);
+    CSGTransform& transform(uint32_t primIndex) { return m_transforms[primIndex]; }
 
     // Compute AABB for a primitive
     AABB computePrimitiveAABB(uint32_t primIndex) const;
@@ -101,6 +113,7 @@ public:
 
 private:
     std::vector<CSGPrimitive> m_primitives;
+    std::vector<CSGTransform> m_transforms;  // Parallel to m_primitives
     std::vector<CSGNode> m_nodes;
     std::vector<uint32_t> m_roots;  // Indices of root nodes
 };
@@ -110,30 +123,35 @@ private:
 inline uint32_t CSGScene::addSphere(float x, float y, float z, float radius) {
     uint32_t idx = primitiveCount();
     m_primitives.push_back({x, y, z, static_cast<uint32_t>(CSGPrimType::Sphere), radius, 0, 0, 0});
+    m_transforms.push_back({0, 0, 0, 1.0f});  // Identity transform
     return idx;
 }
 
 inline uint32_t CSGScene::addBox(float x, float y, float z, float halfX, float halfY, float halfZ) {
     uint32_t idx = primitiveCount();
     m_primitives.push_back({x, y, z, static_cast<uint32_t>(CSGPrimType::Box), halfX, halfY, halfZ, 0});
+    m_transforms.push_back({0, 0, 0, 1.0f});  // Identity transform
     return idx;
 }
 
 inline uint32_t CSGScene::addCylinder(float x, float y, float z, float radius, float height) {
     uint32_t idx = primitiveCount();
     m_primitives.push_back({x, y, z, static_cast<uint32_t>(CSGPrimType::Cylinder), radius, height, 0, 0});
+    m_transforms.push_back({0, 0, 0, 1.0f});  // Identity transform
     return idx;
 }
 
 inline uint32_t CSGScene::addCone(float x, float y, float z, float radius, float height) {
     uint32_t idx = primitiveCount();
     m_primitives.push_back({x, y, z, static_cast<uint32_t>(CSGPrimType::Cone), radius, height, 0, 0});
+    m_transforms.push_back({0, 0, 0, 1.0f});  // Identity transform
     return idx;
 }
 
 inline uint32_t CSGScene::addTorus(float x, float y, float z, float majorR, float minorR) {
     uint32_t idx = primitiveCount();
     m_primitives.push_back({x, y, z, static_cast<uint32_t>(CSGPrimType::Torus), majorR, minorR, 0, 0});
+    m_transforms.push_back({0, 0, 0, 1.0f});  // Identity transform
     return idx;
 }
 
@@ -202,8 +220,13 @@ inline uint32_t CSGScene::addTorusShape(float x, float y, float z, float majorR,
 
 inline void CSGScene::clear() {
     m_primitives.clear();
+    m_transforms.clear();
     m_nodes.clear();
     m_roots.clear();
+}
+
+inline void CSGScene::setTransform(uint32_t primIndex, float rotX, float rotY, float rotZ, float scale) {
+    m_transforms[primIndex] = {rotX, rotY, rotZ, scale};
 }
 
 inline AABB CSGScene::computePrimitiveAABB(uint32_t primIndex) const {
