@@ -1,0 +1,32 @@
+; Lighting Demo - Point lights in darkness
+; No sun - only point lights illuminate the scene
+
+(include "teapot.scene")
+
+; No sun light (intensity 0)
+(sun (intensity 0))
+
+; Materials
+(material ground (type checker) (rgb 0.8 0.8 0.8) (color2 0.15 0.15 0.15) (scale 1.5))
+(material white  (type diffuse) (rgb 0.95 0.95 0.95))
+(material chrome (type metal) (rgb 0.95 0.95 0.97) (roughness 0.05))
+
+; Floor
+(floor (y -0.01) ground)
+
+; Point lights - warm/cool contrast
+(light (at -4 4 -2) (color 1.0 0.8 0.5) (intensity 25))   ; Warm left
+(light (at  4 4 -2) (color 0.5 0.7 1.0) (intensity 25))   ; Cool right
+(light (at  0 6  4) (color 1.0 1.0 1.0) (intensity 20))   ; White back
+
+; White spheres to show lighting
+(shape (sphere (at -2.5 1 0) (r 1)) white)
+(shape (sphere (at  2.5 1 0) (r 1)) white)
+(shape (sphere (at  0 1 -3) (r 1)) white)
+
+; Chrome teapot in center - reflects the point lights
+(instance teapot (at 0 0.3 1.5) (scale 0.6) (rotate -90 0 0) chrome)
+
+; Small colored accent lights near floor
+(light (at -3 0.5 2) (color 1.0 0.2 0.2) (intensity 5))   ; Red accent
+(light (at  3 0.5 2) (color 0.2 0.2 1.0) (intensity 5))   ; Blue accent
