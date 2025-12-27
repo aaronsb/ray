@@ -21,9 +21,10 @@ layout(local_size_x = 16, local_size_y = 16) in;
 #define FEATURE_AREA_LIGHTS     1   // Direct sampling of emissive surfaces (soft shadows)
 #define FEATURE_POINT_LIGHTS    1   // Point light sources with distance falloff
 #define FEATURE_FIREFLY_CLAMP   1   // Clamp bright outliers in early frames
+#define FEATURE_DIFFUSE_BOUNCE  0   // Multi-bounce GI (diffuse surfaces bounce instead of terminate)
 
 #ifndef MAX_BOUNCES
-#define MAX_BOUNCES             4   // Max ray depth (4-8 typical)
+#define MAX_BOUNCES             4   // Max ray depth (2-4 typical for interactive, higher for quality)
 #endif
 // ============================================================================
 
@@ -891,9 +892,18 @@ void main() {
 #if FEATURE_POINT_LIGHTS
             extraLight += evaluatePointLights(hitPoint, normal, floorColor);
 #endif
+#if FEATURE_DIFFUSE_BOUNCE
+            // Add direct lighting, then bounce for indirect
+            color += throughput * (diffuse + extraLight);
+            throughput *= floorColor;
+            ray.origin = hitPoint + normal * EPSILON * 2.0;
+            ray.direction = cosineWeightedHemisphere(normal);
+            continue;
+#else
             color += throughput * (ambient + diffuse + extraLight);
             terminated = true;
             break;
+#endif
         }
 
 #if FEATURE_CSG
@@ -958,9 +968,17 @@ void main() {
 #if FEATURE_POINT_LIGHTS
                 extraLight += evaluatePointLights(hitPoint, normal, matColor);
 #endif
+#if FEATURE_DIFFUSE_BOUNCE
+                // Add direct lighting, then bounce for indirect
+                color += throughput * (diffuse + extraLight);
+                throughput *= matColor;
+                ray.origin = hitPoint + normal * EPSILON * 2.0;
+                ray.direction = cosineWeightedHemisphere(normal);
+#else
                 color += throughput * (ambient + diffuse + extraLight);
                 terminated = true;
                 break;
+#endif
             }
             continue;  // Bounce
         }
@@ -1019,9 +1037,18 @@ void main() {
 #if FEATURE_POINT_LIGHTS
             extraLight += evaluatePointLights(hitPoint, normal, baseColor);
 #endif
+#if FEATURE_DIFFUSE_BOUNCE
+            // Add direct lighting, then bounce for indirect
+            color += throughput * (diffuse + extraLight);
+            throughput *= baseColor;
+            ray.origin = hitPoint + normal * EPSILON * 2.0;
+            ray.direction = cosineWeightedHemisphere(normal);
+            continue;
+#else
             color += throughput * (ambient + diffuse + extraLight);
             terminated = true;
             break;
+#endif
         }
 
         // ----- METAL -----

@@ -30,3 +30,25 @@ void initRNGWithCamera(ivec2 pixel, uint frame, vec3 camPos) {
     uint camHash = pcgHash(floatBitsToUint(camPos.x) ^ floatBitsToUint(camPos.y) ^ floatBitsToUint(camPos.z));
     rngState = pcgHash(uint(pixel.x) + uint(pixel.y) * 10000u + frame * 100000000u + camHash);
 }
+
+// Cosine-weighted hemisphere sampling for diffuse bounces
+// Returns direction distributed with PDF proportional to cos(theta)
+vec3 cosineWeightedHemisphere(vec3 normal) {
+    float u1 = rand();
+    float u2 = rand();
+
+    // Cosine-weighted point on hemisphere (tangent space)
+    float r = sqrt(u1);
+    float theta = 2.0 * 3.14159265 * u2;
+    float x = r * cos(theta);
+    float y = r * sin(theta);
+    float z = sqrt(1.0 - u1);  // cos(theta) = sqrt(1-u1) for cosine weighting
+
+    // Build orthonormal basis from normal
+    vec3 up = abs(normal.y) < 0.999 ? vec3(0, 1, 0) : vec3(1, 0, 0);
+    vec3 tangent = normalize(cross(up, normal));
+    vec3 bitangent = cross(normal, tangent);
+
+    // Transform to world space
+    return normalize(tangent * x + bitangent * y + normal * z);
+}
