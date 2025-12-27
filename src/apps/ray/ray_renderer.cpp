@@ -30,6 +30,9 @@ void RayRenderer::initResources() {
         if (parametric::SceneLoader::loadFile(m_scenePath.toStdString(), sceneData)) {
             printf("Loaded scene from %s\n", qPrintable(m_scenePath));
 
+            // Build instances BEFORE moving materials (buildInstances uses materials.find)
+            m_instances = sceneData.buildInstances();
+
             // Transfer data to renderer members
             m_csgScene = std::move(sceneData.csg);
             m_materials = std::move(sceneData.materials);
@@ -43,9 +46,6 @@ void RayRenderer::initResources() {
                 printf("  Patches:    %zu groups, %zu total patches\n",
                        sceneData.patchGroups.size(), patches.size());
             }
-
-            // Build instances from scene data
-            m_instances = sceneData.buildInstances();
 
             printf("  Materials:  %u\n", m_materials.count());
             printf("  Primitives: %u\n", m_csgScene.primitiveCount());

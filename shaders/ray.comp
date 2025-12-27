@@ -861,6 +861,7 @@ void main() {
         uint matType = mat.type;
         vec3 baseColor = vec3(mat.r, mat.g, mat.b);
 
+
 #if FEATURE_BUMP
         // Bump mapping for rough metals (metallic field encodes bump strength)
         if (matType == MAT_METAL && mat.metallic > 0.0) {
