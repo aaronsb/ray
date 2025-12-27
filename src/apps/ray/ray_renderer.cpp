@@ -256,8 +256,10 @@ void RayRenderer::startNextFrame() {
     }
     m_lastFrameTime = now;
 
-    // Update window title with FPS
-    m_window->setTitle(QString("Ray's Bouncy Castle - %1 fps").arg(static_cast<int>(m_fps)));
+    // Update window title with resolution and FPS
+    QSize sz = m_window->swapChainImageSize();
+    m_window->setTitle(QString("Ray's Bouncy Castle - %1x%2 - %3 fps")
+        .arg(sz.width()).arg(sz.height()).arg(static_cast<int>(m_fps)));
 
     VkCommandBuffer cmdBuf = m_window->currentCommandBuffer();
     recordComputeCommands(cmdBuf);
