@@ -95,6 +95,7 @@ Who casts shadows on whom:
 | **Area Lights** | `FEATURE_AREA_LIGHTS` | Direct sampling of emissives |
 | **Point Lights** | `FEATURE_POINT_LIGHTS` | Point light evaluation |
 | **Firefly Clamp** | `FEATURE_FIREFLY_CLAMP` | Adaptive luminance clamping for early frames |
+| **Diffuse Bounce** | `FEATURE_DIFFUSE_BOUNCE` | Multi-bounce GI with stochastic termination |
 | **Accumulation** | `FEATURE_ACCUMULATION` | Progressive refinement |
 | **Jitter** | `FEATURE_JITTER` | Subpixel anti-aliasing |
 | **CSG** | `FEATURE_CSG` | Constructive solid geometry |
@@ -107,17 +108,34 @@ Who casts shadows on whom:
 | Bezier emissives not area lights | Patch groups can't be sampled as lights | Add parametric surface sampling |
 | Floor can't be emissive | Infinite plane has infinite area | Limit to visible region |
 | No texture mapping | Only procedural patterns (checker) | Add UV coordinates + texture sampling |
-| Single bounce path tracing | Limited global illumination | Add path tracing with MIS |
+| GI convergence speed | Multi-bounce GI slower to converge | Denoising, adaptive sampling |
 | Hard shadows from sun | No soft shadow penumbra | Sample sun disc for soft shadows |
 | No motion blur | Static scenes only | Add temporal sampling |
 | No depth of field | Pinhole camera | Add aperture sampling |
+
+## Performance vs Quality Tradeoffs
+
+Current compile-time flags that affect performance:
+
+| Flag | Off (Fast) | On (Quality) |
+|------|------------|--------------|
+| `FEATURE_DIFFUSE_BOUNCE` | Single bounce + ambient hack | Multi-bounce GI, stochastic termination |
+| `FEATURE_AREA_LIGHTS` | No soft shadows from emissives | Soft shadows, more rays per pixel |
+| `FEATURE_ROUGHNESS` | Perfect mirrors only | GGX microfacet (more expensive) |
+| `FEATURE_SHADOWS` | No shadow rays | Shadow testing on diffuse hits |
+| `MAX_BOUNCES` | Lower = faster | Higher = better glass/GI |
+
+**Potential future improvements:**
+- Runtime quality presets (draft/preview/final)
+- Adaptive quality based on camera motion
+- Per-material quality hints
 
 ## Future Considerations
 
 - **Multiple Importance Sampling (MIS)** - Balance BRDF vs light sampling
 - **Next Event Estimation** - Explicit light sampling at each bounce
-- **Russian Roulette** - Probabilistic path termination
 - **Denoising** - AI or filter-based noise reduction (see ADR-010)
 - **Volumetrics** - Fog, smoke, subsurface scattering
 - **Instancing** - Multiple copies of same geometry
 - **Transforms** - Rotation/scale for CSG primitives
+- **Quality Presets** - Runtime toggleable performance/quality modes
