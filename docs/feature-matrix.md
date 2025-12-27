@@ -29,6 +29,7 @@ Which material types work on which geometry:
 | **Spot Lights** | Cone lights with inner/outer angle falloff | ✓ Implemented |
 | **Gobo Patterns** | Procedural spotlight masks (bars, grid, dots, radial, noise) | ✓ Implemented |
 | **Gaussian GI** | Deterministic indirect lighting via Gaussian radiance field | ✓ Implemented |
+| **Gaussian Caustics** | Ray-traced caustic splatting: sun → glass → Gaussian deposits | ✓ Spheres, boxes |
 
 ### Historical Features (Removed)
 
@@ -97,11 +98,22 @@ Who casts shadows on whom:
 | **Area Lights** | `FEATURE_AREA_LIGHTS` | Direct sampling of emissives |
 | **Point Lights** | `FEATURE_POINT_LIGHTS` | Point light evaluation |
 | **Firefly Clamp** | `FEATURE_FIREFLY_CLAMP` | Adaptive luminance clamping for early frames |
-| **Diffuse Bounce** | `FEATURE_DIFFUSE_BOUNCE` | Multi-bounce GI with stochastic termination |
+| **Gaussian GI** | `FEATURE_GAUSSIAN_GI` | Gaussian-based indirect lighting (replaces path tracing) |
 | **Accumulation** | `FEATURE_ACCUMULATION` | Progressive refinement |
 | **Jitter** | `FEATURE_JITTER` | Subpixel anti-aliasing |
 | **CSG** | `FEATURE_CSG` | Constructive solid geometry |
 | **Dispersion** | `FEATURE_DISPERSION` | Chromatic aberration (TODO) |
+
+## Emergent Optical Behaviors
+
+Effects that arise naturally from physically-based rendering without explicit implementation:
+
+| Effect | Description | Cause |
+|--------|-------------|-------|
+| **Retroreflection** | Glass spheres reflect light back toward source | Refraction + internal reflection geometry |
+| **Caustic focusing** | Bright spots under glass objects | Photon concentration from refraction |
+| **Color bleeding** | Colored surfaces tint nearby objects | Gaussian GI propagation |
+| **Fresnel halos** | Bright edges on glass at grazing angles | Schlick approximation + total internal reflection |
 
 ## Known Limitations
 
@@ -110,7 +122,7 @@ Who casts shadows on whom:
 | Bezier emissives not area lights | Patch groups can't be sampled as lights | Add parametric surface sampling |
 | Floor can't be emissive | Infinite plane has infinite area | Limit to visible region |
 | No texture mapping | Only procedural patterns (checker) | Add UV coordinates + texture sampling |
-| GI convergence speed | Multi-bounce GI slower to converge | Denoising, adaptive sampling |
+| Caustics limited to spheres/boxes | Only sphere and box glass primitives trace caustic photons | Add cylinder, cone, torus tracing |
 | Hard shadows from sun | No soft shadow penumbra | Sample sun disc for soft shadows |
 | No motion blur | Static scenes only | Add temporal sampling |
 | No depth of field | Pinhole camera | Add aperture sampling |
