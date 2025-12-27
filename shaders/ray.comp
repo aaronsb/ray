@@ -18,6 +18,7 @@ layout(local_size_x = 16, local_size_y = 16) in;
 #define FEATURE_ACCUMULATION    1   // Temporal accumulation (progressive refinement)
 #define FEATURE_JITTER          1   // Subpixel jitter for anti-aliasing
 #define FEATURE_CSG             1   // Interval-based CSG (analytic, exact edges)
+#define FEATURE_AREA_LIGHTS     1   // Direct sampling of emissive surfaces (soft shadows)
 
 #ifndef MAX_BOUNCES
 #define MAX_BOUNCES             4   // Max ray depth (4-8 typical)
@@ -213,6 +214,16 @@ const float T_MAX = 1000.0;
 #endif
 
 #include "includes/geometry.glsl"
+#include "includes/sampling.glsl"
+
+// ============================================================================
+// AREA LIGHT SAMPLING (Direct lighting from emissive objects)
+// Forward declarations - implementations after hitCSG and hitAllInstances
+// ============================================================================
+#if FEATURE_AREA_LIGHTS
+bool inShadowAreaLight(vec3 origin, vec3 dir, float maxDist);
+vec3 sampleEmissiveLights(vec3 hitPoint, vec3 normal, vec3 albedo);
+#endif
 
 // Newton iteration tuning
 #define NEWTON_MAX_ITER 6  // Base iterations (used for first frames)
@@ -548,6 +559,88 @@ bool hitAllInstances(Ray worldRay, float tMin, float tMax,
 }
 
 // ============================================================================
+// AREA LIGHT SAMPLING IMPLEMENTATION
+// ============================================================================
+#if FEATURE_AREA_LIGHTS
+
+// Shadow test for area lights - returns true if point is in shadow
+bool inShadowAreaLight(vec3 origin, vec3 dir, float maxDist) {
+    // Test against Bezier instances
+    float shadowT;
+    vec3 shadowN;
+    uint shadowId;
+    if (hitAllInstances(Ray(origin, dir), EPSILON, maxDist, shadowT, shadowN, shadowId)) {
+        return true;
+    }
+
+#if FEATURE_CSG
+    // Test against CSG objects
+    int shadowMat;
+    float csgShadowT;
+    vec3 csgShadowN;
+    if (hitCSG(origin, dir, EPSILON, maxDist, csgShadowT, csgShadowN, shadowMat)) {
+        // Don't count the emissive object itself as blocking (it IS the light)
+        Material mat = materials[shadowMat];
+        if (mat.type != MAT_EMISSIVE) {
+            return true;
+        }
+    }
+#endif
+
+    return false;
+}
+
+// Sample direct lighting contribution from all emissive area lights
+vec3 sampleEmissiveLights(vec3 hitPoint, vec3 normal, vec3 albedo) {
+    if (pc.numEmissiveLights == 0) return vec3(0.0);
+
+    vec3 result = vec3(0.0);
+
+    for (uint i = 0; i < pc.numEmissiveLights; i++) {
+        EmissiveLight eLight = emissiveLights[i];
+
+        // Sample a point on the emissive surface
+        vec3 lightNormal;
+        float pdf;
+        vec3 lightPos = sampleEmissivePrimitive(eLight.primitiveIndex, lightNormal, pdf, eLight.area);
+
+        // Direction from hit point to light sample
+        vec3 toLight = lightPos - hitPoint;
+        float dist = length(toLight);
+        vec3 lightDir = toLight / dist;
+
+        // Check if light is on correct side of both surfaces
+        float NdotL = dot(normal, lightDir);
+        float LNdotL = dot(-lightNormal, lightDir);  // Light normal faces outward
+
+        if (NdotL <= 0.0 || LNdotL <= 0.0) continue;
+
+        // Geometry term: accounts for projected areas and distance falloff
+        float G = NdotL * LNdotL / (dist * dist);
+
+        // Shadow test
+        vec3 shadowOrigin = hitPoint + normal * EPSILON * 2.0;
+        if (inShadowAreaLight(shadowOrigin, lightDir, dist - EPSILON * 4.0)) {
+            continue;
+        }
+
+        // Get emissive material properties
+        CSGNode node = csgNodes[eLight.nodeIndex];
+        Material mat = materials[node.materialId];
+        vec3 emissiveColor = vec3(mat.r, mat.g, mat.b) * mat.emissive;
+
+        // Direct lighting contribution: Le * BRDF * G / pdf
+        // For Lambert BRDF: albedo / PI
+        // Result: emissiveColor * (albedo / PI) * G / pdf
+        result += emissiveColor * albedo * G / (PI * pdf);
+    }
+
+    return result;
+}
+
+#endif  // FEATURE_AREA_LIGHTS
+
+// ============================================================================
 // MATERIAL TYPES
 // ============================================================================
 #define MAT_DIFFUSE  0
@@ -684,7 +777,14 @@ void main() {
             // Apply sun color to lit portion
             vec3 ambient = floorColor * 0.15;
             vec3 diffuse = floorColor * lightCol * NdotL * shadow * 0.85;
+
+#if FEATURE_AREA_LIGHTS
+            // Add direct lighting from emissive area lights
+            vec3 areaLight = sampleEmissiveLights(hitPoint, normal, floorColor);
+            color += throughput * (ambient + diffuse + areaLight);
+#else
             color += throughput * (ambient + diffuse);
+#endif
             break;
         }
 
@@ -741,7 +841,14 @@ void main() {
                 float NdotL = max(dot(normal, lightDir), 0.0);
                 vec3 ambient = matColor * 0.15;
                 vec3 diffuse = matColor * lightCol * NdotL * 0.85;
+
+#if FEATURE_AREA_LIGHTS
+                // Add direct lighting from emissive area lights
+                vec3 areaLight = sampleEmissiveLights(hitPoint, normal, matColor);
+                color += throughput * (ambient + diffuse + areaLight);
+#else
                 color += throughput * (ambient + diffuse);
+#endif
                 break;
             }
             continue;  // Bounce
@@ -790,7 +897,14 @@ void main() {
 #endif
             vec3 ambient = baseColor * 0.15;
             vec3 diffuse = baseColor * lightCol * NdotL * shadow * 0.85;
+
+#if FEATURE_AREA_LIGHTS
+            // Add direct lighting from emissive area lights
+            vec3 areaLight = sampleEmissiveLights(hitPoint, normal, baseColor);
+            color += throughput * (ambient + diffuse + areaLight);
+#else
             color += throughput * (ambient + diffuse);
+#endif
             break;
         }
 
