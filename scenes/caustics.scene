@@ -9,6 +9,7 @@
 (material diamond (type glass) (rgb 1.0 1.0 1.0) (ior 2.4))
 (material white (type diffuse) (rgb 0.9 0.9 0.9))
 (material red (type diffuse) (rgb 0.8 0.2 0.1))
+(material bronze (type metal) (rgb 0.8 0.5 0.2) (roughness 0.15))
 
 ; Moderate sun for visible caustics without overexposure
 (sun (azimuth 30) (elevation 55) (intensity 1.0) (color 1.0 0.98 0.92) (ambient 0.02))
@@ -24,11 +25,18 @@
 ; Large glass sphere - should create circular caustic
 (shape (sphere (at 0 1.5 0) (r 1.5)) glass)
 
-; Smaller high-IOR sphere (diamond) - tighter caustic focus
-(shape (sphere (at -3 0.8 1) (r 0.8)) diamond)
+; Smaller high-IOR sphere (diamond) - floating one radius above floor
+(shape (sphere (at -3 1.6 1) (r 0.8)) diamond)
 
 ; Water-glass sphere - softer caustic
 (shape (sphere (at 3 1.0 -1) (r 1.0)) water-glass)
+
+; ============================================================================
+; Glass cube with bronze torus inside
+; Cube is 2x2x2, centered at y=1.5 (half height = 1, so bottom at y=0.5)
+; ============================================================================
+(shape (box (at -4 1.5 -2) (half 1.0 1.0 1.0)) glass)
+(shape (torus (at -4 1.5 -2) (R 0.6) (r 0.2)) bronze)
 
 ; ============================================================================
 ; Glass cylinder - creates line caustic
