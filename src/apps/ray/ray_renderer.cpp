@@ -272,36 +272,16 @@ void RayRenderer::releaseResources() {
 void RayRenderer::startNextFrame() {
     // Calculate FPS
     qint64 now = m_frameTimer.nsecsElapsed();
-    qint64 nowMs = now / 1000000;
     if (m_lastFrameTime > 0) {
         float frameMs = (now - m_lastFrameTime) / 1000000.0f;
         m_fps = m_fps * 0.9f + (1000.0f / frameMs) * 0.1f;  // Smoothed
     }
     m_lastFrameTime = now;
 
-    // Temporal mode: commit camera changes at 30 FPS, accumulate samples between
-    if (m_temporalMode) {
-        qint64 elapsed = nowMs - m_lastCommitTime;
-        if (elapsed >= TEMPORAL_PERIOD_MS) {
-            // Time to commit: only reset if camera actually moved
-            if (m_camera != m_targetCamera) {
-                m_camera = m_targetCamera;
-                m_frameIndex = 0;  // Reset accumulation for new camera position
-                m_samplesThisPeriod = 0;
-            }
-            m_lastCommitTime = nowMs;
-        }
-        m_samplesThisPeriod++;
-    }
-
-    // Update window title with resolution, FPS, and temporal mode info
+    // Update window title with resolution and FPS
     QSize sz = m_window->swapChainImageSize();
-    QString title = QString("Ray's Bouncy Castle - %1x%2 - %3 fps")
-        .arg(sz.width()).arg(sz.height()).arg(static_cast<int>(m_fps));
-    if (m_temporalMode) {
-        title += QString(" [Temporal: %1 spp]").arg(m_samplesThisPeriod);
-    }
-    m_window->setTitle(title);
+    m_window->setTitle(QString("Ray's Bouncy Castle - %1x%2 - %3 fps")
+        .arg(sz.width()).arg(sz.height()).arg(static_cast<int>(m_fps)));
 
     VkCommandBuffer cmdBuf = m_window->currentCommandBuffer();
     recordComputeCommands(cmdBuf);
@@ -1380,11 +1360,6 @@ void RayWindow::keyPressEvent(QKeyEvent* event) {
     } else if (event->key() == Qt::Key_3 && m_renderer) {
         m_renderer->setQualityLevel(2);
         printf("Quality: Final (8 bounces)\n");
-    } else if (event->key() == Qt::Key_T && m_renderer) {
-        bool newMode = !m_renderer->temporalMode();
-        m_renderer->setTemporalMode(newMode);
-        printf("Temporal accumulation: %s (30 FPS camera updates)\n",
-               newMode ? "ON" : "OFF");
     }
 }
 
