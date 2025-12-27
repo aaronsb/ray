@@ -525,7 +525,7 @@ void GIGaussianField::traceCausticPhotons(const CSGScene& scene,
             // Deposit caustic Gaussian at floor hit
             // Intensity based on focusing - closer = brighter
             float focusFactor = radius / (tFloor * 0.5f + radius);
-            float intensity = focusFactor * focusFactor * 50.0f;  // Strong caustics
+            float intensity = focusFactor * focusFactor * 20.0f;  // Balanced caustics
 
             // Radius based on distance (spreads with distance)
             float causticRadius = 0.15f + tFloor * 0.05f;

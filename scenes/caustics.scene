@@ -10,8 +10,8 @@
 (material white (type diffuse) (rgb 0.9 0.9 0.9))
 (material red (type diffuse) (rgb 0.8 0.2 0.1))
 
-; Strong directional sun for sharp caustics
-(sun (azimuth 30) (elevation 55) (intensity 3.0) (color 1.0 0.98 0.92) (ambient 0.01))
+; Moderate sun for visible caustics without overexposure
+(sun (azimuth 30) (elevation 55) (intensity 1.0) (color 1.0 0.98 0.92) (ambient 0.02))
 
 ; Checker floor material and floor
 (material checker-floor (type checker) (rgb 0.9 0.9 0.9) (color2 0.15 0.15 0.15) (scale 1.0))
