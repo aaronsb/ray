@@ -420,6 +420,44 @@ namespace {
         float t = (planeY - ro.y) / rd.y;
         return t > 0 ? t : -1;
     }
+
+    // Ray-box intersection (AABB), returns entry t and exit t, and entry normal
+    bool intersectBox(CausticVec3 ro, CausticVec3 rd,
+                      CausticVec3 boxMin, CausticVec3 boxMax,
+                      float& tEntry, float& tExit, CausticVec3& normalEntry) {
+        float t1 = (boxMin.x - ro.x) / (std::abs(rd.x) > 1e-6f ? rd.x : 1e-6f);
+        float t2 = (boxMax.x - ro.x) / (std::abs(rd.x) > 1e-6f ? rd.x : 1e-6f);
+        float t3 = (boxMin.y - ro.y) / (std::abs(rd.y) > 1e-6f ? rd.y : 1e-6f);
+        float t4 = (boxMax.y - ro.y) / (std::abs(rd.y) > 1e-6f ? rd.y : 1e-6f);
+        float t5 = (boxMin.z - ro.z) / (std::abs(rd.z) > 1e-6f ? rd.z : 1e-6f);
+        float t6 = (boxMax.z - ro.z) / (std::abs(rd.z) > 1e-6f ? rd.z : 1e-6f);
+
+        float tmin = std::max(std::max(std::min(t1, t2), std::min(t3, t4)), std::min(t5, t6));
+        float tmax = std::min(std::min(std::max(t1, t2), std::max(t3, t4)), std::max(t5, t6));
+
+        if (tmax < 0 || tmin > tmax) return false;
+
+        tEntry = tmin;
+        tExit = tmax;
+
+        // Determine entry normal
+        if (tmin == std::min(t1, t2)) normalEntry = CausticVec3(rd.x > 0 ? -1 : 1, 0, 0);
+        else if (tmin == std::min(t3, t4)) normalEntry = CausticVec3(0, rd.y > 0 ? -1 : 1, 0);
+        else normalEntry = CausticVec3(0, 0, rd.z > 0 ? -1 : 1);
+
+        return true;
+    }
+
+    // Get exit normal for box
+    CausticVec3 getBoxExitNormal(CausticVec3 hitPoint, CausticVec3 boxMin, CausticVec3 boxMax) {
+        float eps = 0.001f;
+        if (std::abs(hitPoint.x - boxMin.x) < eps) return CausticVec3(-1, 0, 0);
+        if (std::abs(hitPoint.x - boxMax.x) < eps) return CausticVec3(1, 0, 0);
+        if (std::abs(hitPoint.y - boxMin.y) < eps) return CausticVec3(0, -1, 0);
+        if (std::abs(hitPoint.y - boxMax.y) < eps) return CausticVec3(0, 1, 0);
+        if (std::abs(hitPoint.z - boxMin.z) < eps) return CausticVec3(0, 0, -1);
+        return CausticVec3(0, 0, 1);
+    }
 }
 
 void GIGaussianField::traceCausticPhotons(const CSGScene& scene,
@@ -443,7 +481,7 @@ void GIGaussianField::traceCausticPhotons(const CSGScene& scene,
     const auto& roots = scene.roots();
     const auto& mats = materials.materials();
 
-    // Find glass sphere primitives
+    // Find glass primitives (spheres and boxes)
     for (uint32_t rootIdx : roots) {
         const auto& node = nodes[rootIdx];
         if (node.type != static_cast<uint32_t>(CSGNodeType::Primitive)) continue;
@@ -454,66 +492,94 @@ void GIGaussianField::traceCausticPhotons(const CSGScene& scene,
         if (mat.type != static_cast<uint32_t>(MaterialType::Glass)) continue;
 
         const auto& prim = prims[node.left];
-        if (prim.type != static_cast<uint32_t>(CSGPrimType::Sphere)) continue;
+        bool isSphere = (prim.type == static_cast<uint32_t>(CSGPrimType::Sphere));
+        bool isBox = (prim.type == static_cast<uint32_t>(CSGPrimType::Box));
+        if (!isSphere && !isBox) continue;
 
         CausticVec3 center(prim.x, prim.y, prim.z);
-        float radius = prim.param0;
         float ior = mat.ior;
-
-        // Trace photons through this glass sphere
-        // Shoot rays from high above, parallel to sun direction, hitting different parts of sphere
         CausticVec3 sunDirNorm = sunDir.normalized();
 
+        // Get primitive extent for ray grid
+        float extent;
+        CausticVec3 boxMin, boxMax;
+        if (isSphere) {
+            extent = prim.param0;  // radius
+        } else {
+            // Box: half extents
+            float hx = prim.param0, hy = prim.param1, hz = prim.param2;
+            extent = std::max({hx, hy, hz});
+            boxMin = CausticVec3(center.x - hx, center.y - hy, center.z - hz);
+            boxMax = CausticVec3(center.x + hx, center.y + hy, center.z + hz);
+        }
+
+        // Create orthonormal basis from sun direction
+        CausticVec3 up(0, 1, 0);
+        if (std::abs(sunDirNorm.y) > 0.99f) up = CausticVec3(1, 0, 0);
+        CausticVec3 right(
+            up.y * sunDirNorm.z - up.z * sunDirNorm.y,
+            up.z * sunDirNorm.x - up.x * sunDirNorm.z,
+            up.x * sunDirNorm.y - up.y * sunDirNorm.x
+        );
+        right = right.normalized();
+        CausticVec3 forward(
+            sunDirNorm.y * right.z - sunDirNorm.z * right.y,
+            sunDirNorm.z * right.x - sunDirNorm.x * right.z,
+            sunDirNorm.x * right.y - sunDirNorm.y * right.x
+        );
+
         for (int i = 0; i < photonsPerGlass; i++) {
-            // Grid of rays covering the sphere's cross-section
+            // Grid of rays covering the primitive's cross-section
             int gridSize = static_cast<int>(std::sqrt(static_cast<float>(photonsPerGlass)));
             int xi = i % gridSize;
             int yi = i / gridSize;
 
-            // Offset in plane perpendicular to sun direction
-            float u = (static_cast<float>(xi) / (gridSize - 1) - 0.5f) * 2.0f * radius * 0.95f;
-            float v = (static_cast<float>(yi) / (gridSize - 1) - 0.5f) * 2.0f * radius * 0.95f;
+            float u = (static_cast<float>(xi) / (gridSize - 1) - 0.5f) * 2.0f * extent * 0.95f;
+            float v = (static_cast<float>(yi) / (gridSize - 1) - 0.5f) * 2.0f * extent * 0.95f;
 
-            // Create orthonormal basis from sun direction
-            CausticVec3 up(0, 1, 0);
-            if (std::abs(sunDirNorm.y) > 0.99f) up = CausticVec3(1, 0, 0);
-            CausticVec3 right(
-                up.y * sunDirNorm.z - up.z * sunDirNorm.y,
-                up.z * sunDirNorm.x - up.x * sunDirNorm.z,
-                up.x * sunDirNorm.y - up.y * sunDirNorm.x
-            );
-            right = right.normalized();
-            CausticVec3 forward(
-                sunDirNorm.y * right.z - sunDirNorm.z * right.y,
-                sunDirNorm.z * right.x - sunDirNorm.x * right.z,
-                sunDirNorm.x * right.y - sunDirNorm.y * right.x
-            );
-
-            // Ray origin: far above sphere, offset by u,v in perpendicular plane
-            CausticVec3 ro = center - sunDirNorm * (radius * 10.0f) + right * u + forward * v;
+            CausticVec3 ro = center - sunDirNorm * (extent * 10.0f) + right * u + forward * v;
             CausticVec3 rd = sunDirNorm;
 
-            // Find entry point on sphere
-            float tEntry = intersectSphere(ro, rd, center, radius);
-            if (tEntry < 0) continue;
+            CausticVec3 hitEntry, normalEntry, hitExit, normalExit;
+            CausticVec3 refracted, exitDir;
 
-            CausticVec3 hitEntry = ro + rd * tEntry;
-            CausticVec3 normalEntry = (hitEntry - center).normalized();
+            if (isSphere) {
+                float radius = prim.param0;
+                float tEntry = intersectSphere(ro, rd, center, radius);
+                if (tEntry < 0) continue;
 
-            // Refract into glass
-            CausticVec3 refracted = refractVec(rd, normalEntry, 1.0f / ior);
-            if (refracted.length() < 0.5f) continue;  // TIR
+                hitEntry = ro + rd * tEntry;
+                normalEntry = (hitEntry - center).normalized();
 
-            // Find exit point
-            float tExit = intersectSphereFar(hitEntry + refracted * 0.001f, refracted, center, radius);
-            if (tExit < 0) continue;
+                refracted = refractVec(rd, normalEntry, 1.0f / ior);
+                if (refracted.length() < 0.5f) continue;
 
-            CausticVec3 hitExit = hitEntry + refracted * (tExit + 0.001f);
-            CausticVec3 normalExit = (hitExit - center).normalized();
+                float tExit = intersectSphereFar(hitEntry + refracted * 0.001f, refracted, center, radius);
+                if (tExit < 0) continue;
+
+                hitExit = hitEntry + refracted * (tExit + 0.001f);
+                normalExit = (hitExit - center).normalized();
+            } else {
+                // Box
+                float tEntry, tExit;
+                if (!intersectBox(ro, rd, boxMin, boxMax, tEntry, tExit, normalEntry)) continue;
+
+                hitEntry = ro + rd * tEntry;
+                refracted = refractVec(rd, normalEntry, 1.0f / ior);
+                if (refracted.length() < 0.5f) continue;
+
+                // Trace through box to find exit
+                float tEntry2, tExit2;
+                CausticVec3 dummyNorm;
+                if (!intersectBox(hitEntry + refracted * 0.01f, refracted, boxMin, boxMax, tEntry2, tExit2, dummyNorm)) continue;
+
+                hitExit = hitEntry + refracted * (tExit2 + 0.01f);
+                normalExit = getBoxExitNormal(hitExit, boxMin, boxMax);
+            }
 
             // Refract out of glass
-            CausticVec3 exitDir = refractVec(refracted, normalExit * -1.0f, ior);
-            if (exitDir.length() < 0.5f) continue;  // TIR
+            exitDir = refractVec(refracted, normalExit * -1.0f, ior);
+            if (exitDir.length() < 0.5f) continue;
             exitDir = exitDir.normalized();
 
             // Trace to floor (y = 0)
@@ -522,21 +588,15 @@ void GIGaussianField::traceCausticPhotons(const CSGScene& scene,
 
             CausticVec3 floorHit = hitExit + exitDir * tFloor;
 
-            // Deposit caustic Gaussian at floor hit
-            // Intensity based on focusing - closer = brighter
-            float focusFactor = radius / (tFloor * 0.5f + radius);
-            float intensity = focusFactor * focusFactor * 20.0f;  // Balanced caustics
-
-            // Radius based on distance (spreads with distance)
+            // Deposit caustic Gaussian
+            float focusFactor = extent / (tFloor * 0.5f + extent);
+            float intensity = focusFactor * focusFactor * 20.0f;
             float causticRadius = 0.15f + tFloor * 0.05f;
 
-            // Add caustic Gaussian (high radiance, normal points toward floor)
-            // Normal should be opposite of exit direction so it "shines down" onto floor
             GIGaussian g;
             g.posX = floorHit.x;
-            g.posY = floorHit.y + 0.05f;  // Slightly above floor
+            g.posY = floorHit.y + 0.05f;
             g.posZ = floorHit.z;
-            // Normal points down toward floor (opposite of query direction from floor)
             g.normX = -exitDir.x;
             g.normY = -exitDir.y;
             g.normZ = -exitDir.z;
