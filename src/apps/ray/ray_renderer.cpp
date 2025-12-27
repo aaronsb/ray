@@ -21,6 +21,16 @@ RayRenderer::RayRenderer(QVulkanWindow* window,
 
 void RayRenderer::initResources() {
     m_devFuncs = m_window->vulkanInstance()->deviceFunctions(m_window->device());
+
+    // Guard against repeated initialization - only load scene once
+    if (m_resourcesInitialized) {
+        // Device was recreated - just reinitialize GPU resources
+        m_frameTimer.start();
+        createPatchBuffers();
+        createComputePipeline();
+        return;
+    }
+    m_resourcesInitialized = true;
     m_frameTimer.start();
 
     // Try loading scene from file (empty path = empty scene)

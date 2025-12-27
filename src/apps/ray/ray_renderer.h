@@ -246,6 +246,7 @@ private:
     uint32_t m_frameIndex = 0;
     uint32_t m_qualityLevel = 2;  // 0=Draft, 1=Preview, 2=Final (default)
     bool m_needsImageTransition = true;
+    bool m_resourcesInitialized = false;
     QElapsedTimer m_frameTimer;
     float m_fps = 0.0f;
     qint64 m_lastFrameTime = 0;
