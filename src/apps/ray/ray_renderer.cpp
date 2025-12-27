@@ -53,6 +53,9 @@ void RayRenderer::initResources() {
             printf("  Roots:      %u\n", m_csgScene.rootCount());
             printf("  Instances:  %zu\n", m_instances.size());
             printf("  Sun:        az=%.1f° el=%.1f°\n", m_lights.sun.azimuth, m_lights.sun.elevation);
+            if (m_lights.pointLightCount() > 0) {
+                printf("  Lights:     %u point lights\n", m_lights.pointLightCount());
+            }
 
             // Build BVH for CSG roots
             m_csgBVH.build(m_csgScene);

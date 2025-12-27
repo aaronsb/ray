@@ -19,6 +19,7 @@ layout(local_size_x = 16, local_size_y = 16) in;
 #define FEATURE_JITTER          1   // Subpixel jitter for anti-aliasing
 #define FEATURE_CSG             1   // Interval-based CSG (analytic, exact edges)
 #define FEATURE_AREA_LIGHTS     1   // Direct sampling of emissive surfaces (soft shadows)
+#define FEATURE_POINT_LIGHTS    1   // Point light sources with distance falloff
 
 #ifndef MAX_BOUNCES
 #define MAX_BOUNCES             4   // Max ray depth (4-8 typical)
@@ -223,6 +224,10 @@ const float T_MAX = 1000.0;
 #if FEATURE_AREA_LIGHTS
 bool inShadowAreaLight(vec3 origin, vec3 dir, float maxDist);
 vec3 sampleEmissiveLights(vec3 hitPoint, vec3 normal, vec3 albedo);
+#endif
+
+#if FEATURE_POINT_LIGHTS
+vec3 evaluatePointLights(vec3 hitPoint, vec3 normal, vec3 albedo);
 #endif
 
 // Newton iteration tuning
@@ -641,6 +646,70 @@ vec3 sampleEmissiveLights(vec3 hitPoint, vec3 normal, vec3 albedo) {
 #endif  // FEATURE_AREA_LIGHTS
 
 // ============================================================================
+// POINT LIGHT EVALUATION
+// ============================================================================
+#if FEATURE_POINT_LIGHTS
+
+// Evaluate contribution from all point lights
+vec3 evaluatePointLights(vec3 hitPoint, vec3 normal, vec3 albedo) {
+    vec3 result = vec3(0.0);
+
+    // Iterate through all lights (skip lights[0] which is the sun)
+    for (uint i = 1; i < pc.numLights; i++) {
+        Light light = lights[i];
+        if (light.type != LIGHT_POINT) continue;
+
+        // Direction and distance to light
+        vec3 lightPos = light.direction;  // For point lights, direction field holds position
+        vec3 toLight = lightPos - hitPoint;
+        float dist = length(toLight);
+        vec3 lightDir = toLight / dist;
+
+        // Check if light is on correct side of surface
+        float NdotL = dot(normal, lightDir);
+        if (NdotL <= 0.0) continue;
+
+        // Distance attenuation (inverse square law)
+        float attenuation = 1.0 / (dist * dist);
+
+        // Shadow test
+        vec3 shadowOrigin = hitPoint + normal * EPSILON * 2.0;
+        bool inShadow = false;
+
+#if FEATURE_SHADOWS
+        float shadowT;
+        vec3 shadowN;
+        uint shadowId;
+        if (hitAllInstances(Ray(shadowOrigin, lightDir), EPSILON, dist - EPSILON * 2.0, shadowT, shadowN, shadowId)) {
+            inShadow = true;
+        }
+#if FEATURE_CSG
+        if (!inShadow) {
+            int shadowMat;
+            float csgShadowT;
+            vec3 csgShadowN;
+            if (hitCSG(shadowOrigin, lightDir, EPSILON, dist - EPSILON * 2.0, csgShadowT, csgShadowN, shadowMat)) {
+                inShadow = true;
+            }
+        }
+#endif
+#endif
+
+        if (inShadow) continue;
+
+        // Light color and intensity
+        vec3 lightColor = light.color * light.intensity;
+
+        // Lambertian contribution
+        result += albedo * lightColor * NdotL * attenuation;
+    }
+
+    return result;
+}
+
+#endif  // FEATURE_POINT_LIGHTS
+
+// ============================================================================
 // MATERIAL TYPES
 // ============================================================================
 #define MAT_DIFFUSE  0
@@ -778,13 +847,14 @@ void main() {
             vec3 ambient = floorColor * 0.15;
             vec3 diffuse = floorColor * lightCol * NdotL * shadow * 0.85;
 
+            vec3 extraLight = vec3(0.0);
 #if FEATURE_AREA_LIGHTS
-            // Add direct lighting from emissive area lights
-            vec3 areaLight = sampleEmissiveLights(hitPoint, normal, floorColor);
-            color += throughput * (ambient + diffuse + areaLight);
-#else
-            color += throughput * (ambient + diffuse);
+            extraLight += sampleEmissiveLights(hitPoint, normal, floorColor);
 #endif
+#if FEATURE_POINT_LIGHTS
+            extraLight += evaluatePointLights(hitPoint, normal, floorColor);
+#endif
+            color += throughput * (ambient + diffuse + extraLight);
             break;
         }
 
@@ -842,13 +912,14 @@ void main() {
                 vec3 ambient = matColor * 0.15;
                 vec3 diffuse = matColor * lightCol * NdotL * 0.85;
 
+                vec3 extraLight = vec3(0.0);
 #if FEATURE_AREA_LIGHTS
-                // Add direct lighting from emissive area lights
-                vec3 areaLight = sampleEmissiveLights(hitPoint, normal, matColor);
-                color += throughput * (ambient + diffuse + areaLight);
-#else
-                color += throughput * (ambient + diffuse);
+                extraLight += sampleEmissiveLights(hitPoint, normal, matColor);
 #endif
+#if FEATURE_POINT_LIGHTS
+                extraLight += evaluatePointLights(hitPoint, normal, matColor);
+#endif
+                color += throughput * (ambient + diffuse + extraLight);
                 break;
             }
             continue;  // Bounce
@@ -899,13 +970,14 @@ void main() {
             vec3 ambient = baseColor * 0.15;
             vec3 diffuse = baseColor * lightCol * NdotL * shadow * 0.85;
 
+            vec3 extraLight = vec3(0.0);
 #if FEATURE_AREA_LIGHTS
-            // Add direct lighting from emissive area lights
-            vec3 areaLight = sampleEmissiveLights(hitPoint, normal, baseColor);
-            color += throughput * (ambient + diffuse + areaLight);
-#else
-            color += throughput * (ambient + diffuse);
+            extraLight += sampleEmissiveLights(hitPoint, normal, baseColor);
 #endif
+#if FEATURE_POINT_LIGHTS
+            extraLight += evaluatePointLights(hitPoint, normal, baseColor);
+#endif
+            color += throughput * (ambient + diffuse + extraLight);
             break;
         }
 

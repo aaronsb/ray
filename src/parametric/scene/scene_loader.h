@@ -127,6 +127,8 @@ private:
             processInstance(expr);
         } else if (cmd == "sun") {
             processSun(expr);
+        } else if (cmd == "light") {
+            processPointLight(expr);
         } else if (cmd == "floor") {
             processFloor(expr);
         }
@@ -168,6 +170,36 @@ private:
                 sun.angularRadius = static_cast<float>(prop[1].asNumber());
             }
         }
+    }
+
+    // (light (at x y z) (color r g b) (intensity i))
+    void processPointLight(const SExp& expr) {
+        Light light;
+        light.type = static_cast<uint32_t>(LightType::Point);
+        light.dirX = 0; light.dirY = 5; light.dirZ = 0;  // Default position
+        light.r = 1; light.g = 1; light.b = 1;           // Default white
+        light.intensity = 1.0f;
+
+        for (size_t i = 1; i < expr.size(); i++) {
+            const auto& prop = expr[i];
+            if (!prop.isList() || prop.size() == 0) continue;
+
+            const std::string& key = prop.head();
+
+            if ((key == "at" || key == "position") && prop.size() >= 4) {
+                light.dirX = static_cast<float>(prop[1].asNumber());
+                light.dirY = static_cast<float>(prop[2].asNumber());
+                light.dirZ = static_cast<float>(prop[3].asNumber());
+            } else if ((key == "color" || key == "rgb") && prop.size() >= 4) {
+                light.r = static_cast<float>(prop[1].asNumber());
+                light.g = static_cast<float>(prop[2].asNumber());
+                light.b = static_cast<float>(prop[3].asNumber());
+            } else if (key == "intensity" && prop.size() >= 2) {
+                light.intensity = static_cast<float>(prop[1].asNumber());
+            }
+        }
+
+        data_.lights.pointLights.push_back(light);
     }
 
     // (floor material-name) or (floor (y -1) material-name)
