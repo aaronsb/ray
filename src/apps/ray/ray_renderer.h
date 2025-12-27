@@ -64,8 +64,9 @@ struct RayPushConstants {
     // Row 6: 16 bytes
     float bgR, bgG, bgB;
     float skyAmbient;
-    // Row 7: 16 bytes (padding to 128 for alignment)
-    uint32_t _pad0, _pad1, _pad2, _pad3;
+    // Row 7: 16 bytes
+    uint32_t qualityLevel;  // 0=Draft, 1=Preview, 2=Final
+    uint32_t _pad1, _pad2, _pad3;
 };
 
 // Simple orbit camera
@@ -130,6 +131,12 @@ public:
         m_frameIndex = 0;
         m_window->requestUpdate();
     }
+    void setQualityLevel(uint32_t level) {
+        m_qualityLevel = level;
+        m_frameIndex = 0;  // Reset accumulation
+        m_window->requestUpdate();
+    }
+    uint32_t qualityLevel() const { return m_qualityLevel; }
 
     bool saveScreenshot(const QString& filename);
 
@@ -216,6 +223,7 @@ private:
 
     // Frame tracking
     uint32_t m_frameIndex = 0;
+    uint32_t m_qualityLevel = 2;  // 0=Draft, 1=Preview, 2=Final (default)
     bool m_needsImageTransition = true;
     QElapsedTimer m_frameTimer;
     float m_fps = 0.0f;

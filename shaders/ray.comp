@@ -66,9 +66,19 @@ layout(push_constant) uniform PushConstants {
     // Row 6: 16 bytes
     float bgR, bgG, bgB;     // Scene background for rays that miss (when no sky)
     float skyAmbient;        // Sky ambient contribution (0 = no ambient)
-    // Row 7: 16 bytes (padding to 128 for alignment)
-    uint _pad0, _pad1, _pad2, _pad3;
+    // Row 7: 16 bytes
+    uint qualityLevel;       // 0=Draft, 1=Preview, 2=Final
+    uint _pad1, _pad2, _pad3;
 } pc;
+
+// Quality-dependent max bounces
+// All levels need enough bounces for glass refraction (4+)
+// The difference is whether diffuse surfaces bounce (GI) or terminate
+int getMaxBounces() {
+    if (pc.qualityLevel == 0) return 4;       // Draft: glass works, no diffuse GI
+    else if (pc.qualityLevel == 1) return 5;  // Preview: glass + some GI
+    else return 6;                             // Final: full GI
+}
 
 // Helper to get background color as vec3
 vec3 getBackgroundColor() {
@@ -782,11 +792,12 @@ void main() {
     vec3 throughput = vec3(1.0);
     bool terminated = false;  // Track if ray was properly terminated
 
-    for (int bounce = 0; bounce < MAX_BOUNCES; bounce++) {
+    int maxBounces = getMaxBounces();
+    for (int bounce = 0; bounce < maxBounces; bounce++) {
 #if FEATURE_DIFFUSE_BOUNCE
         // Stochastic termination: after minimum bounces, probabilistically terminate
-        // low-throughput paths. Survivors are boosted to maintain unbiased estimator.
-        if (bounce >= 2) {
+        // low-throughput paths. Only for Preview/Final quality (not Draft).
+        if (pc.qualityLevel >= 1 && bounce >= 2) {
             float maxThroughput = max(throughput.r, max(throughput.g, throughput.b));
             float survivalProb = min(maxThroughput, 0.95);  // Cap at 95% to guarantee eventual termination
             if (rand() > survivalProb) {
@@ -907,17 +918,19 @@ void main() {
             extraLight += evaluatePointLights(hitPoint, normal, floorColor);
 #endif
 #if FEATURE_DIFFUSE_BOUNCE
-            // Add direct lighting, then bounce for indirect
-            color += throughput * (diffuse + extraLight);
-            throughput *= floorColor;
-            ray.origin = hitPoint + normal * EPSILON * 2.0;
-            ray.direction = cosineWeightedHemisphere(normal);
-            continue;
-#else
+            // Quality >= 1 (Preview/Final): bounce for GI
+            // Quality == 0 (Draft): terminate with ambient hack
+            if (pc.qualityLevel >= 1) {
+                color += throughput * (diffuse + extraLight);
+                throughput *= floorColor;
+                ray.origin = hitPoint + normal * EPSILON * 2.0;
+                ray.direction = cosineWeightedHemisphere(normal);
+                continue;
+            }
+#endif
             color += throughput * (ambient + diffuse + extraLight);
             terminated = true;
             break;
-#endif
         }
 
 #if FEATURE_CSG
@@ -983,11 +996,17 @@ void main() {
                 extraLight += evaluatePointLights(hitPoint, normal, matColor);
 #endif
 #if FEATURE_DIFFUSE_BOUNCE
-                // Add direct lighting, then bounce for indirect
-                color += throughput * (diffuse + extraLight);
-                throughput *= matColor;
-                ray.origin = hitPoint + normal * EPSILON * 2.0;
-                ray.direction = cosineWeightedHemisphere(normal);
+                // Quality >= 1 (Preview/Final): bounce for GI
+                if (pc.qualityLevel >= 1) {
+                    color += throughput * (diffuse + extraLight);
+                    throughput *= matColor;
+                    ray.origin = hitPoint + normal * EPSILON * 2.0;
+                    ray.direction = cosineWeightedHemisphere(normal);
+                } else {
+                    color += throughput * (ambient + diffuse + extraLight);
+                    terminated = true;
+                    break;
+                }
 #else
                 color += throughput * (ambient + diffuse + extraLight);
                 terminated = true;
@@ -1052,17 +1071,18 @@ void main() {
             extraLight += evaluatePointLights(hitPoint, normal, baseColor);
 #endif
 #if FEATURE_DIFFUSE_BOUNCE
-            // Add direct lighting, then bounce for indirect
-            color += throughput * (diffuse + extraLight);
-            throughput *= baseColor;
-            ray.origin = hitPoint + normal * EPSILON * 2.0;
-            ray.direction = cosineWeightedHemisphere(normal);
-            continue;
-#else
+            // Quality >= 1 (Preview/Final): bounce for GI
+            if (pc.qualityLevel >= 1) {
+                color += throughput * (diffuse + extraLight);
+                throughput *= baseColor;
+                ray.origin = hitPoint + normal * EPSILON * 2.0;
+                ray.direction = cosineWeightedHemisphere(normal);
+                continue;
+            }
+#endif
             color += throughput * (ambient + diffuse + extraLight);
             terminated = true;
             break;
-#endif
         }
 
         // ----- METAL -----

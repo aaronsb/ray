@@ -750,6 +750,7 @@ void RayRenderer::recordComputeCommands(VkCommandBuffer cmdBuf) {
     pc.bgG = m_background.g;
     pc.bgB = m_background.b;
     pc.skyAmbient = m_lights.skyAmbient();
+    pc.qualityLevel = m_qualityLevel;
 
     m_devFuncs->vkCmdPushConstants(cmdBuf, m_pipelineLayout,
         VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RayPushConstants), &pc);
@@ -1287,6 +1288,15 @@ void RayWindow::keyPressEvent(QKeyEvent* event) {
     } else if (event->key() == Qt::Key_R && m_renderer) {
         // Reset accumulation (start fresh)
         m_renderer->markCameraMotion();
+    } else if (event->key() == Qt::Key_1 && m_renderer) {
+        m_renderer->setQualityLevel(0);
+        printf("Quality: Draft (4 bounces, no diffuse GI)\n");
+    } else if (event->key() == Qt::Key_2 && m_renderer) {
+        m_renderer->setQualityLevel(1);
+        printf("Quality: Preview (5 bounces, diffuse GI)\n");
+    } else if (event->key() == Qt::Key_3 && m_renderer) {
+        m_renderer->setQualityLevel(2);
+        printf("Quality: Final (6 bounces, full GI)\n");
     }
 }
 
