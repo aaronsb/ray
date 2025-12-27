@@ -115,6 +115,13 @@ struct RayCamera {
         y = targetY + distance * std::sin(elevation);
         z = targetZ + distance * std::cos(elevation) * std::cos(azimuth);
     }
+
+    bool operator==(const RayCamera& other) const {
+        return distance == other.distance && azimuth == other.azimuth &&
+               elevation == other.elevation && targetX == other.targetX &&
+               targetY == other.targetY && targetZ == other.targetZ;
+    }
+    bool operator!=(const RayCamera& other) const { return !(*this == other); }
 };
 
 class RayRenderer : public QVulkanWindowRenderer {
@@ -128,11 +135,14 @@ public:
     void releaseResources() override;
     void startNextFrame() override;
 
-    RayCamera& camera() { return m_camera; }
+    RayCamera& camera() { return m_temporalMode ? m_targetCamera : m_camera; }
     float fps() const { return m_fps; }
     uint32_t frameIndex() const { return m_frameIndex; }
     void markCameraMotion() {
-        m_frameIndex = 0;
+        if (!m_temporalMode) {
+            m_frameIndex = 0;
+        }
+        // In temporal mode, camera changes are deferred until next commit
         m_window->requestUpdate();
     }
     void setQualityLevel(uint32_t level) {
@@ -141,6 +151,19 @@ public:
         m_window->requestUpdate();
     }
     uint32_t qualityLevel() const { return m_qualityLevel; }
+
+    // Temporal accumulation mode (T key)
+    void setTemporalMode(bool enabled) {
+        m_temporalMode = enabled;
+        if (enabled) {
+            m_targetCamera = m_camera;  // Sync target to current
+            m_lastCommitTime = m_frameTimer.elapsed();
+        }
+        m_frameIndex = 0;
+        m_window->requestUpdate();
+    }
+    bool temporalMode() const { return m_temporalMode; }
+    uint32_t samplesThisPeriod() const { return m_samplesThisPeriod; }
 
     bool saveScreenshot(const QString& filename);
 
@@ -153,6 +176,7 @@ private:
     BezierPatchGroup m_patchGroup;
     std::vector<BezierInstance> m_instances;
     RayCamera m_camera;
+    RayCamera m_targetCamera;  // For temporal mode: receives input, committed at 30 FPS
 
     // CSG scene data
     CSGScene m_csgScene;
@@ -239,6 +263,12 @@ private:
     QElapsedTimer m_frameTimer;
     float m_fps = 0.0f;
     qint64 m_lastFrameTime = 0;
+
+    // Temporal accumulation mode
+    bool m_temporalMode = false;
+    qint64 m_lastCommitTime = 0;      // When we last committed camera changes
+    uint32_t m_samplesThisPeriod = 0; // Samples accumulated since last commit
+    static constexpr qint64 TEMPORAL_PERIOD_MS = 33;  // ~30 FPS
 
     // Helpers
     VkShaderModule createShaderModule(const QString& path);
