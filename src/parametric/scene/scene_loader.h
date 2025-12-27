@@ -7,6 +7,7 @@
 #include "../csg/csg.h"
 #include "../materials/material.h"
 #include "../bezier/patch_group.h"
+#include "../lights/lights.h"
 #include <fstream>
 #include <sstream>
 #include <unordered_map>
@@ -24,10 +25,19 @@ struct PatchInstance {
     std::string materialName;
 };
 
+// Floor settings (scene-defined ground plane)
+struct FloorSettings {
+    bool enabled = false;
+    float y = -1.0f;           // Y position
+    std::string materialName;  // Material to use (any type)
+};
+
 // Complete scene data
 struct SceneData {
     CSGScene csg;
     MaterialLibrary materials;
+    LightList lights;
+    FloorSettings floor;
     std::map<std::string, std::vector<Patch>> patchGroups;
     std::vector<PatchInstance> patchInstances;
 
@@ -115,6 +125,70 @@ private:
             processPatches(expr);
         } else if (cmd == "instance") {
             processInstance(expr);
+        } else if (cmd == "sun") {
+            processSun(expr);
+        } else if (cmd == "floor") {
+            processFloor(expr);
+        }
+    }
+
+    // (sun (azimuth 45) (elevation 30) (color 1 0.98 0.9) (intensity 1.2))
+    // or (sun (direction x y z) (color r g b) (intensity i))
+    void processSun(const SExp& expr) {
+        SunLight& sun = data_.lights.sun;
+
+        for (size_t i = 1; i < expr.size(); i++) {
+            const auto& prop = expr[i];
+            if (!prop.isList() || prop.size() == 0) continue;
+
+            const std::string& key = prop.head();
+
+            if (key == "azimuth" && prop.size() >= 2) {
+                sun.azimuth = static_cast<float>(prop[1].asNumber());
+            } else if (key == "elevation" && prop.size() >= 2) {
+                sun.elevation = static_cast<float>(prop[1].asNumber());
+            } else if (key == "direction" && prop.size() >= 4) {
+                // Convert direction to azimuth/elevation
+                float x = static_cast<float>(prop[1].asNumber());
+                float y = static_cast<float>(prop[2].asNumber());
+                float z = static_cast<float>(prop[3].asNumber());
+                float len = std::sqrt(x*x + y*y + z*z);
+                if (len > 0.001f) {
+                    x /= len; y /= len; z /= len;
+                    sun.elevation = std::asin(y) * 180.0f / 3.14159265f;
+                    sun.azimuth = std::atan2(x, z) * 180.0f / 3.14159265f;
+                }
+            } else if ((key == "color" || key == "rgb") && prop.size() >= 4) {
+                sun.r = static_cast<float>(prop[1].asNumber());
+                sun.g = static_cast<float>(prop[2].asNumber());
+                sun.b = static_cast<float>(prop[3].asNumber());
+            } else if (key == "intensity" && prop.size() >= 2) {
+                sun.intensity = static_cast<float>(prop[1].asNumber());
+            } else if (key == "radius" && prop.size() >= 2) {
+                sun.angularRadius = static_cast<float>(prop[1].asNumber());
+            }
+        }
+    }
+
+    // (floor material-name) or (floor (y -1) material-name)
+    void processFloor(const SExp& expr) {
+        FloorSettings& floor = data_.floor;
+        floor.enabled = true;  // Presence of floor element enables it
+
+        // Last element is material name
+        if (expr.size() >= 2) {
+            floor.materialName = expr[expr.size() - 1].asSymbol();
+        }
+
+        for (size_t i = 1; i < expr.size() - 1; i++) {
+            const auto& prop = expr[i];
+            if (!prop.isList() || prop.size() == 0) continue;
+
+            const std::string& key = prop.head();
+
+            if (key == "y" && prop.size() >= 2) {
+                floor.y = static_cast<float>(prop[1].asNumber());
+            }
         }
     }
 
@@ -275,6 +349,15 @@ private:
                 else if (typeName == "metal") mat.type = static_cast<uint32_t>(MaterialType::Metal);
                 else if (typeName == "glass") mat.type = static_cast<uint32_t>(MaterialType::Glass);
                 else if (typeName == "emissive") mat.type = static_cast<uint32_t>(MaterialType::Emissive);
+                else if (typeName == "checker") mat.type = static_cast<uint32_t>(MaterialType::Checker);
+            } else if (key == "color2" || key == "rgb2") {
+                // For checker: second color stored in roughness/metallic/ior
+                mat.roughness = static_cast<float>(prop[1].asNumber());
+                mat.metallic = static_cast<float>(prop[2].asNumber());
+                mat.ior = static_cast<float>(prop[3].asNumber());
+            } else if (key == "scale") {
+                // For checker: pattern scale stored in emissive
+                mat.emissive = static_cast<float>(prop[1].asNumber());
             } else if (key == "albedo" || key == "rgb") {
                 mat.r = static_cast<float>(prop[1].asNumber());
                 mat.g = static_cast<float>(prop[2].asNumber());

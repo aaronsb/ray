@@ -7,14 +7,25 @@
 (include "teapot.scene")
 
 ; ============================================================================
+; Sun (default afternoon sun)
+; ============================================================================
+(sun (azimuth 45) (elevation 45) (intensity 1.0))
+
+; ============================================================================
 ; Materials
 ; ============================================================================
+(material ground (type checker) (rgb 0.9 0.9 0.9) (color2 0.1 0.1 0.1) (scale 2.0))
 (material red    (type metal) (rgb 0.9 0.2 0.2) (roughness 0.05))
 (material green  (type metal) (rgb 0.2 0.8 0.3) (roughness 0.05))
 (material blue   (type metal) (rgb 0.2 0.4 0.9) (roughness 0.05))
 (material gold   (type metal) (rgb 0.83 0.69 0.22) (roughness 0.02))
 (material silver (type metal) (rgb 0.95 0.95 0.97) (roughness 0.02))
 (material glass  (type glass) (rgb 0.95 0.95 0.95) (ior 1.5))
+
+; ============================================================================
+; Floor
+; ============================================================================
+(floor (y -1.0) ground)
 
 ; ============================================================================
 ; Row 1 (z = 6): Plain primitives

@@ -1,0 +1,53 @@
+; Basic Shapes - Primitives showcase with sun lighting
+; No CSG operations, just plain shapes
+
+; ============================================================================
+; Includes
+; ============================================================================
+(include "teapot.scene")
+
+; ============================================================================
+; Sun (afternoon sun with warm tones)
+; ============================================================================
+(sun (azimuth 135) (elevation 35) (color 1.0 0.95 0.85) (intensity 1.0))
+
+; ============================================================================
+; Materials
+; ============================================================================
+(material ground  (type checker) (rgb 0.9 0.9 0.9) (color2 0.1 0.1 0.1) (scale 2.0))
+(material copper  (type metal) (rgb 0.72 0.45 0.20) (roughness 0.08) (metallic 0.5))
+(material chrome  (type metal) (rgb 0.95 0.95 0.97) (roughness 0.02))
+(material brass   (type metal) (rgb 0.80 0.58 0.21) (roughness 0.05))
+(material blue    (type metal) (rgb 0.3 0.5 0.9) (roughness 0.1))
+(material jade    (type diffuse) (rgb 0.4 0.7 0.5))
+
+; ============================================================================
+; Floor
+; ============================================================================
+(floor (y -0.01) ground)
+
+; ============================================================================
+; Basic Primitives (arranged in a gentle arc)
+; ============================================================================
+
+; Sphere (center-left)
+(shape (sphere (at -4 1.0 2) (r 1.0)) chrome)
+
+; Box (center)
+(shape (box (at 0 0.9 3) (half 0.9 0.9 0.9)) blue)
+
+; Cylinder (center-right)
+(shape (cylinder (at 4 0 2) (r 0.8) (h 2.0)) brass)
+
+; Cone (far right)
+(shape (cone (at 7 0 0) (r 1.0) (h 2.2)) copper)
+
+; ============================================================================
+; Utah Teapot (lid up, centered, on a small pedestal)
+; ============================================================================
+
+; Pedestal for teapot
+(shape (cylinder (at 0 0 -3) (r 1.2) (h 0.3)) jade)
+
+; Teapot - rotated to lid-up (original data has teapot on its side)
+(instance teapot (at 0 0.3 -3) (scale 0.6) (rotate -90 0 0) chrome)

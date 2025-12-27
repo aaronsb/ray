@@ -16,6 +16,7 @@ enum class MaterialType : uint32_t {
     Metal = 1,
     Glass = 2,
     Emissive = 3,
+    Checker = 4,   // Checker pattern: rgb=color1, roughness/metallic/ior=color2 RGB, emissive=scale
 };
 
 // GPU Material - 32 bytes

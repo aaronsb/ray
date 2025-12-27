@@ -22,13 +22,15 @@ vec3 checkerPattern(vec3 p, float scale, vec3 color1, vec3 color2) {
     return white ? color1 : color2;
 }
 
-// Rayleigh scattering sky model
+// Rayleigh scattering sky model with visible sun disc
 // Based on simplified atmospheric scattering with day/night support
-vec3 skyGradient(vec3 dir) {
+// sunDir: normalized direction TO the sun
+// sunColor: sun light color
+// sunIntensity: sun brightness multiplier
+// sunAngularRadius: angular radius of sun disc in radians (~0.009 for real sun)
+vec3 skyGradientWithSun(vec3 dir, vec3 sunDir, vec3 sunColor, float sunIntensity, float sunAngularRadius) {
     vec3 unitDir = normalize(dir);
-
-    // Sun direction (configurable, default afternoon sun)
-    vec3 sunDir = normalize(vec3(0.4, 0.3, 0.5));
+    sunDir = normalize(sunDir);
 
     // Rayleigh scattering coefficients (wavelength^-4 dependence)
     // Blue scatters more than red
@@ -47,18 +49,39 @@ vec3 skyGradient(vec3 dir) {
     float cosAngle = dot(unitDir, sunDir);
     float phase = 0.75 * (1.0 + cosAngle * cosAngle);
 
-    // Scattered light
+    // Scattered light (tinted by sun color for atmosphere effects)
     vec3 scatter = (vec3(1.0) - exp(-betaR * viewOpticalDepth * 0.4)) * phase;
-    vec3 skyColor = scatter * daylight * 1.5;
+    vec3 skyCol = scatter * daylight * sunIntensity * 1.5;
 
-    // Sun glow (simplified Mie scattering)
-    float sunProximity = max(0.0, cosAngle);
-    float mieGlow = pow(sunProximity, 32.0) * 2.0;
-    vec3 sunColor = vec3(1.0, 0.95, 0.8) * mieGlow * daylight;
+    // Sun disc rendering - sharp edge with limb darkening
+    float angularDist = acos(clamp(cosAngle, -1.0, 1.0));
+    float sunDisc = 0.0;
+    if (angularDist < sunAngularRadius * 1.5) {
+        // Limb darkening: center is brighter than edge
+        float u = angularDist / sunAngularRadius;
+        if (u < 1.0) {
+            // Quadratic limb darkening
+            float limbDarkening = 1.0 - 0.6 * u * u;
+            sunDisc = limbDarkening * 50.0 * sunIntensity;  // Bright sun
+        } else {
+            // Corona/glow falloff outside disc
+            sunDisc = exp(-(u - 1.0) * 8.0) * 5.0 * sunIntensity;
+        }
+    }
+    vec3 sunDiscColor = sunColor * sunDisc * daylight;
 
-    // Horizon glow
+    // Horizon glow (warm tones at low sun angles)
     float horizonGlow = exp(-viewAltitude * 8.0);
-    vec3 horizonColor = vec3(0.7, 0.5, 0.3) * horizonGlow * 0.3 * daylight;
+    float sunsetFactor = smoothstep(0.3, -0.1, sunAlt);  // More glow at sunset
+    vec3 horizonColor = mix(vec3(0.5, 0.4, 0.3), vec3(0.9, 0.4, 0.2), sunsetFactor)
+                       * horizonGlow * 0.4 * daylight * sunIntensity;
 
-    return skyColor + sunColor + horizonColor;
+    return skyCol + sunDiscColor + horizonColor;
+}
+
+// Convenience wrapper using global light buffer
+// Requires: lights[] buffer and pc.sunAngularRadius to be defined
+vec3 skyGradient(vec3 dir) {
+    Light sun = lights[0];
+    return skyGradientWithSun(dir, sun.direction, sun.color, sun.intensity, pc.sunAngularRadius);
 }

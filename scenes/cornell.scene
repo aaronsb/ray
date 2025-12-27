@@ -1,0 +1,51 @@
+; Cornell Box - Classic rendering test scene
+; Features: Emissive light, mirror sphere, rough mirror sphere
+
+; ============================================================================
+; Materials
+; ============================================================================
+(material white   (type diffuse) (rgb 0.73 0.73 0.73))
+(material red     (type diffuse) (rgb 0.65 0.05 0.05))
+(material green   (type diffuse) (rgb 0.12 0.45 0.15))
+(material mirror  (type metal) (rgb 0.95 0.95 0.95) (roughness 0.0))
+(material rough-mirror (type metal) (rgb 0.85 0.85 0.88) (roughness 0.15) (metallic 0.3))
+(material light   (type emissive) (rgb 1.0 0.95 0.85) (emissive 15.0))
+
+; ============================================================================
+; Sun (dim, since we have an emissive light)
+; ============================================================================
+(sun (azimuth 45) (elevation 60) (color 1.0 0.98 0.9) (intensity 0.1))
+
+; ============================================================================
+; Cornell Box Walls (5 unit box, centered at y=2.5)
+; ============================================================================
+
+; Floor (white)
+(shape (box (at 0 -0.05 0) (half 2.5 0.05 2.5)) white)
+
+; Ceiling (white)
+(shape (box (at 0 5.05 0) (half 2.5 0.05 2.5)) white)
+
+; Back wall (white)
+(shape (box (at 0 2.5 -2.55) (half 2.5 2.5 0.05)) white)
+
+; Left wall (red)
+(shape (box (at -2.55 2.5 0) (half 0.05 2.5 2.5)) red)
+
+; Right wall (green)
+(shape (box (at 2.55 2.5 0) (half 0.05 2.5 2.5)) green)
+
+; ============================================================================
+; Light Panel (emissive rectangle at top)
+; ============================================================================
+(shape (box (at 0 4.99 0) (half 0.65 0.01 0.52)) light)
+
+; ============================================================================
+; Spheres
+; ============================================================================
+
+; Mirror sphere (left side)
+(shape (sphere (at -1.0 0.8 0.5) (r 0.8)) mirror)
+
+; Rough mirror sphere (right side)
+(shape (sphere (at 1.0 0.8 -0.5) (r 0.8)) rough-mirror)

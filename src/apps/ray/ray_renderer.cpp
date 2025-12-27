@@ -33,6 +33,8 @@ void RayRenderer::initResources() {
             // Transfer data to renderer members
             m_csgScene = std::move(sceneData.csg);
             m_materials = std::move(sceneData.materials);
+            m_lights = std::move(sceneData.lights);
+            m_floor = sceneData.floor;
 
             // Build patches from scene data
             auto patches = sceneData.allPatches();
@@ -50,6 +52,7 @@ void RayRenderer::initResources() {
             printf("  Nodes:      %u\n", m_csgScene.nodeCount());
             printf("  Roots:      %u\n", m_csgScene.rootCount());
             printf("  Instances:  %zu\n", m_instances.size());
+            printf("  Sun:        az=%.1f° el=%.1f°\n", m_lights.sun.azimuth, m_lights.sun.elevation);
 
             // Build BVH for CSG roots
             m_csgBVH.build(m_csgScene);
@@ -208,6 +211,16 @@ void RayRenderer::releaseResources() {
         m_devFuncs->vkFreeMemory(dev, m_materialBufferMemory, nullptr);
         m_materialBufferMemory = VK_NULL_HANDLE;
     }
+
+    // Light buffer
+    if (m_lightBuffer) {
+        m_devFuncs->vkDestroyBuffer(dev, m_lightBuffer, nullptr);
+        m_lightBuffer = VK_NULL_HANDLE;
+    }
+    if (m_lightBufferMemory) {
+        m_devFuncs->vkFreeMemory(dev, m_lightBufferMemory, nullptr);
+        m_lightBufferMemory = VK_NULL_HANDLE;
+    }
 }
 
 void RayRenderer::startNextFrame() {
@@ -341,18 +354,19 @@ void RayRenderer::createPatchBuffers() {
            m_patchGroup.subPatchCount(), m_patchGroup.bvhNodeCount(), m_instances.size(),
            (patchDataSize + bvhSize + indexSize + instanceSize) / 1024.0f);
 
-    // Create CSG and material buffers
+    // Create CSG, material, and light buffers
     createCSGBuffers();
     createMaterialBuffer();
+    createLightBuffer();
 }
 
 void RayRenderer::createDescriptorSet() {
     VkDevice dev = m_window->device();
 
-    // Create descriptor pool (2 images + 9 buffers)
+    // Create descriptor pool (2 images + 10 buffers)
     std::array<VkDescriptorPoolSize, 2> poolSizes{};
     poolSizes[0] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2};  // output + accumulation
-    poolSizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 9};  // patches, BVH, indices, instances, CSG prims/nodes/roots/bvh, materials
+    poolSizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 10};  // patches, BVH, indices, instances, CSG prims/nodes/roots/bvh, materials, lights
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -429,7 +443,12 @@ void RayRenderer::createDescriptorSet() {
     csgBVHBufferInfo.offset = 0;
     csgBVHBufferInfo.range = VK_WHOLE_SIZE;
 
-    std::array<VkWriteDescriptorSet, 11> writes{};
+    VkDescriptorBufferInfo lightBufferInfo{};
+    lightBufferInfo.buffer = m_lightBuffer;
+    lightBufferInfo.offset = 0;
+    lightBufferInfo.range = VK_WHOLE_SIZE;
+
+    std::array<VkWriteDescriptorSet, 12> writes{};
 
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[0].dstSet = m_descriptorSet;
@@ -511,14 +530,22 @@ void RayRenderer::createDescriptorSet() {
     writes[10].descriptorCount = 1;
     writes[10].pBufferInfo = &csgBVHBufferInfo;
 
+    // Light buffer (binding 11)
+    writes[11].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[11].dstSet = m_descriptorSet;
+    writes[11].dstBinding = 11;
+    writes[11].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[11].descriptorCount = 1;
+    writes[11].pBufferInfo = &lightBufferInfo;
+
     m_devFuncs->vkUpdateDescriptorSets(dev, writes.size(), writes.data(), 0, nullptr);
 }
 
 void RayRenderer::createComputePipeline() {
     VkDevice dev = m_window->device();
 
-    // Descriptor set layout (11 bindings: output image, 4 buffers, accum image, 4 CSG buffers, materials)
-    std::array<VkDescriptorSetLayoutBinding, 11> bindings{};
+    // Descriptor set layout (12 bindings: output image, 4 buffers, accum image, 4 CSG buffers, materials, lights)
+    std::array<VkDescriptorSetLayoutBinding, 12> bindings{};
 
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -577,6 +604,12 @@ void RayRenderer::createComputePipeline() {
     bindings[10].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[10].descriptorCount = 1;
     bindings[10].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    // Light buffer (binding 11)
+    bindings[11].binding = 11;
+    bindings[11].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[11].descriptorCount = 1;
+    bindings[11].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -662,6 +695,11 @@ void RayRenderer::recordComputeCommands(VkCommandBuffer cmdBuf) {
     pc.numCSGRoots = m_csgScene.rootCount();
     pc.numCSGBVHNodes = static_cast<uint32_t>(m_csgBVH.nodeCount());
     pc.numMaterials = m_materials.count();
+    pc.numLights = m_lights.totalCount();
+    pc.sunAngularRadius = m_lights.sunAngularRadius() * 3.14159265f / 180.0f;  // Convert to radians
+    pc.floorEnabled = m_floor.enabled ? 1 : 0;
+    pc.floorY = m_floor.y;
+    pc.floorMaterialId = m_materials.find(m_floor.materialName);
 
     m_devFuncs->vkCmdPushConstants(cmdBuf, m_pipelineLayout,
         VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RayPushConstants), &pc);
@@ -750,6 +788,24 @@ void RayRenderer::createMaterialBuffer() {
         m_devFuncs->vkMapMemory(dev, m_materialBufferMemory, 0, matSize, 0, &data);
         memcpy(data, mats.data(), mats.size() * sizeof(Material));
         m_devFuncs->vkUnmapMemory(dev, m_materialBufferMemory);
+    }
+}
+
+void RayRenderer::createLightBuffer() {
+    VkDevice dev = m_window->device();
+
+    std::vector<Light> lights = m_lights.buildBuffer();
+    size_t lightSize = std::max(lights.size() * sizeof(Light), size_t(32));
+
+    createBuffer(lightSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 m_lightBuffer, m_lightBufferMemory);
+
+    if (!lights.empty()) {
+        void* data;
+        m_devFuncs->vkMapMemory(dev, m_lightBufferMemory, 0, lightSize, 0, &data);
+        memcpy(data, lights.data(), lights.size() * sizeof(Light));
+        m_devFuncs->vkUnmapMemory(dev, m_lightBufferMemory);
     }
 }
 

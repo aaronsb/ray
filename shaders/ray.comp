@@ -11,7 +11,7 @@ layout(local_size_x = 16, local_size_y = 16) in;
 #define FEATURE_SHADOWS         1   // Shadow rays for diffuse
 #define FEATURE_ABSORPTION      1   // Beer's law colored glass
 #define FEATURE_ROUGHNESS       1   // Glossy reflections (GGX)
-#define FEATURE_FLOOR           1   // Checker floor plane
+// Floor is now scene-defined via push constants (pc.floorEnabled)
 #define FEATURE_BUMP            1   // Normal perturbation (orange peel, hammered metal)
 #define FEATURE_DISPERSION      0   // Chromatic aberration (TODO)
 #define FEATURE_EMISSION        1   // Self-illuminating materials
@@ -45,6 +45,11 @@ layout(push_constant) uniform PushConstants {
     uint numCSGRoots;
     uint numCSGBVHNodes;
     uint numMaterials;
+    uint numLights;
+    float sunAngularRadius;  // In radians
+    uint floorEnabled;       // Scene-defined floor
+    float floorY;            // Floor Y position
+    uint floorMaterialId;    // Floor material index
 } pc;
 
 // Patch control points: 16 vec4s per patch (w unused, for alignment)
@@ -137,11 +142,29 @@ layout(std430, set = 0, binding = 10) readonly buffer CSGBVHBuffer {
     CSGBVHNode csgBVHNodes[];
 };
 
+// Light data (must match CPU struct)
+// Type: 0=Directional (sun), 1=Point
+struct Light {
+    vec3 direction;     // Direction (directional) or position (point)
+    uint type;
+    vec3 color;
+    float intensity;
+};
+
+layout(std430, set = 0, binding = 11) readonly buffer LightBuffer {
+    Light lights[];     // lights[0] is always the sun
+};
+
+// Light type constants
+#define LIGHT_DIRECTIONAL  0
+#define LIGHT_POINT        1
+
 // Material type constants
 #define MAT_DIFFUSE   0
 #define MAT_METAL     1
 #define MAT_GLASS     2
 #define MAT_EMISSIVE  3
+#define MAT_CHECKER   4
 
 // CSG node type constants
 #define CSG_NODE_PRIMITIVE  0
@@ -576,24 +599,25 @@ void main() {
         }
 #endif
 
-#if FEATURE_FLOOR
-        float floorT;
-        vec3 floorN;
+        // Scene-defined floor (runtime check)
+        if (pc.floorEnabled != 0u) {
+            float floorT;
+            vec3 floorN;
 #if FEATURE_CSG
-        float tMaxFloor = (hitBezier || hitCSGFlag) ? t : T_MAX;
+            float tMaxFloor = (hitBezier || hitCSGFlag) ? t : T_MAX;
 #else
-        float tMaxFloor = hitBezier ? t : T_MAX;
+            float tMaxFloor = hitBezier ? t : T_MAX;
 #endif
-        if (hitFloorPlane(ray.origin, ray.direction, -1.0, EPSILON, tMaxFloor, floorT, floorN)) {
-            t = floorT;
-            normal = floorN;
-            hitFloorFlag = true;
-            hitBezier = false;
+            if (hitFloorPlane(ray.origin, ray.direction, pc.floorY, EPSILON, tMaxFloor, floorT, floorN)) {
+                t = floorT;
+                normal = floorN;
+                hitFloorFlag = true;
+                hitBezier = false;
 #if FEATURE_CSG
-            hitCSGFlag = false;
+                hitCSGFlag = false;
 #endif
+            }
         }
-#endif
 
 #if FEATURE_CSG
         if (!hitBezier && !hitFloorFlag && !hitCSGFlag) {
@@ -606,11 +630,23 @@ void main() {
 
         vec3 hitPoint = ray.origin + t * ray.direction;
 
-        // Floor material
-#if FEATURE_FLOOR
+        // Floor material (scene-defined)
         if (hitFloorFlag) {
-            vec3 floorColor = checkerPattern(hitPoint, 2.0, vec3(0.9), vec3(0.1));
-            vec3 lightDir = normalize(vec3(1, 2, 1));
+            Material floorMat = materials[pc.floorMaterialId];
+            vec3 color1 = vec3(floorMat.r, floorMat.g, floorMat.b);
+            vec3 floorColor;
+
+            if (floorMat.type == MAT_CHECKER) {
+                // Checker: color2 in roughness/metallic/ior, scale in emissive
+                vec3 color2 = vec3(floorMat.roughness, floorMat.metallic, floorMat.ior);
+                float scale = floorMat.emissive;
+                floorColor = checkerPattern(hitPoint, scale, color1, color2);
+            } else {
+                floorColor = color1;
+            }
+
+            vec3 lightDir = normalize(lights[0].direction);
+            vec3 lightCol = lights[0].color * lights[0].intensity;
             float NdotL = max(dot(normal, lightDir), 0.0);
 
             float shadow = 1.0;
@@ -632,10 +668,12 @@ void main() {
             }
 #endif
 #endif
-            color += throughput * floorColor * (0.2 + 0.8 * NdotL * shadow);
+            // Apply sun color to lit portion
+            vec3 ambient = floorColor * 0.15;
+            vec3 diffuse = floorColor * lightCol * NdotL * shadow * 0.85;
+            color += throughput * (ambient + diffuse);
             break;
         }
-#endif
 
 #if FEATURE_CSG
         // CSG object materials - lookup from buffer
@@ -684,10 +722,13 @@ void main() {
 #endif
                 throughput *= matColor;
             } else {
-                // Diffuse - simple Lambert
-                vec3 lightDir = normalize(vec3(1, 2, 1));
+                // Diffuse - simple Lambert with dynamic sun
+                vec3 lightDir = normalize(lights[0].direction);
+                vec3 lightCol = lights[0].color * lights[0].intensity;
                 float NdotL = max(dot(normal, lightDir), 0.0);
-                color += throughput * matColor * (0.15 + 0.85 * NdotL);
+                vec3 ambient = matColor * 0.15;
+                vec3 diffuse = matColor * lightCol * NdotL * 0.85;
+                color += throughput * (ambient + diffuse);
                 break;
             }
             continue;  // Bounce
@@ -711,7 +752,8 @@ void main() {
 
         // ----- DIFFUSE -----
         if (matType == MAT_DIFFUSE) {
-            vec3 lightDir = normalize(vec3(1, 2, 1));
+            vec3 lightDir = normalize(lights[0].direction);
+            vec3 lightCol = lights[0].color * lights[0].intensity;
             float NdotL = max(dot(normal, lightDir), 0.0);
 
             float shadow = 1.0;
@@ -733,7 +775,9 @@ void main() {
             }
 #endif
 #endif
-            color += throughput * baseColor * (0.15 + 0.85 * NdotL * shadow);
+            vec3 ambient = baseColor * 0.15;
+            vec3 diffuse = baseColor * lightCol * NdotL * shadow * 0.85;
+            color += throughput * (ambient + diffuse);
             break;
         }
 

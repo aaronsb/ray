@@ -11,6 +11,7 @@
 #include "../../parametric/csg/csg.h"
 #include "../../parametric/csg/csg_bvh.h"
 #include "../../parametric/materials/material.h"
+#include "../../parametric/lights/lights.h"
 #include "../../parametric/scene/scene_loader.h"
 
 using parametric::BezierInstance;
@@ -25,6 +26,9 @@ using parametric::Material;
 using parametric::MaterialLibrary;
 using parametric::CSGBVH;
 using parametric::CSGBVHNode;
+using parametric::Light;
+using parametric::LightList;
+using parametric::FloorSettings;
 
 // Push constants matching ray.comp
 struct RayPushConstants {
@@ -41,6 +45,12 @@ struct RayPushConstants {
     uint32_t numCSGRoots;
     uint32_t numCSGBVHNodes;
     uint32_t numMaterials;
+    uint32_t numLights;
+    float sunAngularRadius;
+    uint32_t floorEnabled;
+    float floorY;
+    uint32_t floorMaterialId;
+    float _pad;  // Alignment padding
 };
 
 // Simple orbit camera
@@ -125,6 +135,12 @@ private:
     // Material library
     MaterialLibrary m_materials;
 
+    // Lights
+    LightList m_lights;
+
+    // Floor settings
+    FloorSettings m_floor;
+
     // Vulkan resources
     VkPipeline m_computePipeline = VK_NULL_HANDLE;
     VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
@@ -172,6 +188,10 @@ private:
     VkBuffer m_materialBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_materialBufferMemory = VK_NULL_HANDLE;
 
+    // Light buffer
+    VkBuffer m_lightBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_lightBufferMemory = VK_NULL_HANDLE;
+
     // Frame tracking
     uint32_t m_frameIndex = 0;
     bool m_needsImageTransition = true;
@@ -185,6 +205,7 @@ private:
     void createPatchBuffers();
     void createCSGBuffers();
     void createMaterialBuffer();
+    void createLightBuffer();
     void createDescriptorSet();
     void createComputePipeline();
     void recordComputeCommands(VkCommandBuffer cmdBuf);
