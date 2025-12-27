@@ -881,7 +881,7 @@ void main() {
             }
 #endif
             // Apply sun color to lit portion
-            vec3 ambient = floorColor * 0.15;
+            vec3 ambient = floorColor * pc.skyAmbient;
             vec3 diffuse = floorColor * lightCol * NdotL * shadow * 0.85;
 
             vec3 extraLight = vec3(0.0);
@@ -948,7 +948,7 @@ void main() {
                 vec3 lightDir, lightCol;
                 bool hasSun = getSunLight(lightDir, lightCol);
                 float NdotL = hasSun ? max(dot(normal, lightDir), 0.0) : 0.0;
-                vec3 ambient = matColor * 0.15;
+                vec3 ambient = matColor * pc.skyAmbient;
                 vec3 diffuse = matColor * lightCol * NdotL * 0.85;
 
                 vec3 extraLight = vec3(0.0);
@@ -1009,7 +1009,7 @@ void main() {
 #endif
             }
 #endif
-            vec3 ambient = baseColor * 0.15;
+            vec3 ambient = baseColor * pc.skyAmbient;
             vec3 diffuse = baseColor * lightCol * NdotL * shadow * 0.85;
 
             vec3 extraLight = vec3(0.0);
