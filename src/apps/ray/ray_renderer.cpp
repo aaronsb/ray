@@ -24,10 +24,8 @@ void RayRenderer::initResources() {
 
     // Guard against repeated initialization - only load scene once
     if (m_resourcesInitialized) {
-        // Device was recreated - just reinitialize GPU resources
+        // Already initialized - don't reload scene or recreate buffers
         m_frameTimer.start();
-        createPatchBuffers();
-        createComputePipeline();
         return;
     }
     m_resourcesInitialized = true;
