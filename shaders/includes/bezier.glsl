@@ -125,18 +125,26 @@ float duDalpha(float u) {
     return 4.0 * u * (1.0 - u);
 }
 
-// Simple Newton-Raphson with Kajiya's 2-plane formulation
-// No fancy transformations - just basic clamped iteration
+// Newton-Raphson with Kajiya's 2-plane formulation and Tang et al. parameter transformation
+// Uses α,β ∈ (-∞,∞) mapped to u,v ∈ (0,1) to prevent boundary issues
 bool tryNewtonKajiya(vec3 cp[16], vec3 ro, vec3 rd,
                      vec3 N1, vec3 N2, float d1, float d2,
                      float tMin, float tMax,
                      float startU, float startV,
                      out float hitT, out float hitU, out float hitV, out vec3 hitN) {
 
-    float u = startU;
-    float v = startV;
+    // Transform initial (u,v) to unbounded (α,β) space
+    // Clamp to avoid infinities at exact 0 or 1
+    float u = clamp(startU, 0.01, 0.99);
+    float v = clamp(startV, 0.01, 0.99);
+    float alpha = uToAlpha(u);
+    float beta = uToAlpha(v);
 
     for (int iter = 0; iter < g_newtonMaxIter; iter++) {
+        // Transform back to (u,v) for surface evaluation
+        u = alphaToU(alpha);
+        v = alphaToU(beta);
+
         vec3 S = evalBezierPatch(cp, u, v);
         vec3 Su = evalBezierPatchDu(cp, u, v);
         vec3 Sv = evalBezierPatchDv(cp, u, v);
@@ -147,11 +155,6 @@ bool tryNewtonKajiya(vec3 cp[16], vec3 ro, vec3 rd,
 
         // Check convergence
         if (abs(f1) < NEWTON_EPSILON && abs(f2) < NEWTON_EPSILON) {
-            // Verify (u,v) is in valid range
-            if (u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0) {
-                return false;  // Converged outside patch
-            }
-
             // Compute t from converged surface point
             float t = dot(S - ro, rd) / dot(rd, rd);
 
@@ -167,30 +170,31 @@ bool tryNewtonKajiya(vec3 cp[16], vec3 ro, vec3 rd,
             return false;
         }
 
-        // Standard Jacobian (no transformation)
-        float j11 = dot(N1, Su), j12 = dot(N1, Sv);
-        float j21 = dot(N2, Su), j22 = dot(N2, Sv);
+        // Jacobian with chain rule for parameter transformation
+        // J_αβ = J_uv * diag(du/dα, dv/dβ)
+        float duDa = duDalpha(u);
+        float dvDb = duDalpha(v);
+
+        float j11 = dot(N1, Su) * duDa, j12 = dot(N1, Sv) * dvDb;
+        float j21 = dot(N2, Su) * duDa, j22 = dot(N2, Sv) * dvDb;
 
         float det = j11 * j22 - j12 * j21;
         if (abs(det) < 1e-10) return false;
 
         float invDet = 1.0 / det;
-        float du = invDet * (j22 * f1 - j12 * f2);
-        float dv = invDet * (-j21 * f1 + j11 * f2);
+        float dAlpha = invDet * (j22 * f1 - j12 * f2);
+        float dBeta = invDet * (-j21 * f1 + j11 * f2);
 
 #if NEWTON_DIVERGE_CHECK
         // Early exit if clearly diverging (wrong patch)
-        if (abs(du) + abs(dv) > NEWTON_DIVERGE_THRESHOLD) {
+        if (abs(dAlpha) + abs(dBeta) > NEWTON_DIVERGE_THRESHOLD * 4.0) {
             return false;
         }
 #endif
 
-        u -= du;
-        v -= dv;
-
-        // Clamp to [0,1] - if we go outside, we're looking at wrong patch
-        u = clamp(u, 0.0, 1.0);
-        v = clamp(v, 0.0, 1.0);
+        // Update in unbounded (α,β) space - no clamping needed!
+        alpha -= dAlpha;
+        beta -= dBeta;
     }
 
     return false;  // Didn't converge
