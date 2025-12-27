@@ -196,15 +196,17 @@ Interval getPrimitiveInterval(vec3 ro, vec3 rd, uint primIndex) {
 
 // Stack-based CSG tree evaluation using iterative post-order traversal
 // Returns the interval for a given node index
+const int CSG_STACK_SIZE = 32;
+
 Interval evaluateCSGNode(vec3 ro, vec3 rd, uint nodeIndex) {
     // Stack for traversal: stores (nodeIndex, visitState)
     // visitState: 0 = first visit, 1 = left done, 2 = right done (ready to process)
-    uint traverseStack[32];
-    uint stateStack[32];
+    uint traverseStack[CSG_STACK_SIZE];
+    uint stateStack[CSG_STACK_SIZE];
     int traversePtr = 0;
 
     // Result stack for computed intervals
-    Interval resultStack[32];
+    Interval resultStack[CSG_STACK_SIZE];
     int resultPtr = 0;
 
     // Start with root node
@@ -219,18 +221,21 @@ Interval evaluateCSGNode(vec3 ro, vec3 rd, uint nodeIndex) {
 
         if (node.type == CSG_NODE_PRIMITIVE) {
             // Leaf node - compute interval and push to results
+            if (resultPtr >= CSG_STACK_SIZE) return EMPTY_INTERVAL;  // Result stack overflow
             resultStack[resultPtr++] = getPrimitiveInterval(ro, rd, node.left);
             traversePtr--;  // Pop this node
         } else {
             // Operation node - need to process children first
             if (state == 0) {
                 // First visit - push left child
+                if (traversePtr >= CSG_STACK_SIZE) return EMPTY_INTERVAL;  // Stack overflow
                 stateStack[traversePtr - 1] = 1;
                 traverseStack[traversePtr] = node.left;
                 stateStack[traversePtr] = 0;
                 traversePtr++;
             } else if (state == 1) {
                 // Left child done - push right child
+                if (traversePtr >= CSG_STACK_SIZE) return EMPTY_INTERVAL;  // Stack overflow
                 stateStack[traversePtr - 1] = 2;
                 traverseStack[traversePtr] = node.right;
                 stateStack[traversePtr] = 0;
@@ -251,6 +256,7 @@ Interval evaluateCSGNode(vec3 ro, vec3 rd, uint nodeIndex) {
                     result = EMPTY_INTERVAL;
                 }
 
+                if (resultPtr >= CSG_STACK_SIZE) return EMPTY_INTERVAL;  // Result stack overflow
                 resultStack[resultPtr++] = result;
                 traversePtr--;  // Pop this node
             }
