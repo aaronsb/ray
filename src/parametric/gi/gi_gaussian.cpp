@@ -368,6 +368,190 @@ void GIGaussianField::propagate(int iterations) {
     }
 }
 
+// ============================================================================
+// Caustic Photon Tracing
+// ============================================================================
+
+namespace {
+    struct CausticVec3 {
+        float x, y, z;
+        CausticVec3(float x = 0, float y = 0, float z = 0) : x(x), y(y), z(z) {}
+        CausticVec3 operator+(const CausticVec3& o) const { return {x+o.x, y+o.y, z+o.z}; }
+        CausticVec3 operator-(const CausticVec3& o) const { return {x-o.x, y-o.y, z-o.z}; }
+        CausticVec3 operator*(float s) const { return {x*s, y*s, z*s}; }
+        float dot(const CausticVec3& o) const { return x*o.x + y*o.y + z*o.z; }
+        float length() const { return std::sqrt(dot(*this)); }
+        CausticVec3 normalized() const { float l = length(); return l > 0 ? *this * (1/l) : CausticVec3(); }
+    };
+
+    // Ray-sphere intersection, returns t (or -1 if miss)
+    float intersectSphere(CausticVec3 ro, CausticVec3 rd, CausticVec3 center, float radius) {
+        CausticVec3 oc = ro - center;
+        float b = oc.dot(rd);
+        float c = oc.dot(oc) - radius * radius;
+        float h = b * b - c;
+        if (h < 0) return -1;
+        return -b - std::sqrt(h);  // Near intersection
+    }
+
+    // Far intersection (exit point)
+    float intersectSphereFar(CausticVec3 ro, CausticVec3 rd, CausticVec3 center, float radius) {
+        CausticVec3 oc = ro - center;
+        float b = oc.dot(rd);
+        float c = oc.dot(oc) - radius * radius;
+        float h = b * b - c;
+        if (h < 0) return -1;
+        return -b + std::sqrt(h);  // Far intersection
+    }
+
+    // Refract vector using Snell's law
+    // Returns zero vector for total internal reflection
+    CausticVec3 refractVec(CausticVec3 incident, CausticVec3 normal, float eta) {
+        float cosI = -normal.dot(incident);
+        float sin2T = eta * eta * (1.0f - cosI * cosI);
+        if (sin2T > 1.0f) return CausticVec3();  // TIR
+        float cosT = std::sqrt(1.0f - sin2T);
+        return incident * eta + normal * (eta * cosI - cosT);
+    }
+
+    // Ray-plane intersection (y = planeY)
+    float intersectFloor(CausticVec3 ro, CausticVec3 rd, float planeY) {
+        if (std::abs(rd.y) < 1e-6f) return -1;
+        float t = (planeY - ro.y) / rd.y;
+        return t > 0 ? t : -1;
+    }
+}
+
+void GIGaussianField::traceCausticPhotons(const CSGScene& scene,
+                                           const MaterialLibrary& materials,
+                                           const SunLight& sun,
+                                           int photonsPerGlass) {
+    // Get sun direction
+    float sunDirX, sunDirY, sunDirZ;
+    sun.getDirection(sunDirX, sunDirY, sunDirZ);
+    CausticVec3 sunDir(-sunDirX, -sunDirY, -sunDirZ);  // Direction FROM sun
+
+    // Sun intensity
+    float sunR = sun.r * sun.intensity;
+    float sunG = sun.g * sun.intensity;
+    float sunB = sun.b * sun.intensity;
+
+    if (sun.intensity <= 0) return;
+
+    const auto& prims = scene.primitives();
+    const auto& nodes = scene.nodes();
+    const auto& roots = scene.roots();
+    const auto& mats = materials.materials();
+
+    // Find glass sphere primitives
+    for (uint32_t rootIdx : roots) {
+        const auto& node = nodes[rootIdx];
+        if (node.type != static_cast<uint32_t>(CSGNodeType::Primitive)) continue;
+
+        uint32_t matId = node.materialId;
+        if (matId >= mats.size()) continue;
+        const auto& mat = mats[matId];
+        if (mat.type != static_cast<uint32_t>(MaterialType::Glass)) continue;
+
+        const auto& prim = prims[node.left];
+        if (prim.type != static_cast<uint32_t>(CSGPrimType::Sphere)) continue;
+
+        CausticVec3 center(prim.x, prim.y, prim.z);
+        float radius = prim.param0;
+        float ior = mat.ior;
+
+        // Trace photons through this glass sphere
+        // Shoot rays from high above, parallel to sun direction, hitting different parts of sphere
+        CausticVec3 sunDirNorm = sunDir.normalized();
+
+        for (int i = 0; i < photonsPerGlass; i++) {
+            // Grid of rays covering the sphere's cross-section
+            int gridSize = static_cast<int>(std::sqrt(static_cast<float>(photonsPerGlass)));
+            int xi = i % gridSize;
+            int yi = i / gridSize;
+
+            // Offset in plane perpendicular to sun direction
+            float u = (static_cast<float>(xi) / (gridSize - 1) - 0.5f) * 2.0f * radius * 0.95f;
+            float v = (static_cast<float>(yi) / (gridSize - 1) - 0.5f) * 2.0f * radius * 0.95f;
+
+            // Create orthonormal basis from sun direction
+            CausticVec3 up(0, 1, 0);
+            if (std::abs(sunDirNorm.y) > 0.99f) up = CausticVec3(1, 0, 0);
+            CausticVec3 right(
+                up.y * sunDirNorm.z - up.z * sunDirNorm.y,
+                up.z * sunDirNorm.x - up.x * sunDirNorm.z,
+                up.x * sunDirNorm.y - up.y * sunDirNorm.x
+            );
+            right = right.normalized();
+            CausticVec3 forward(
+                sunDirNorm.y * right.z - sunDirNorm.z * right.y,
+                sunDirNorm.z * right.x - sunDirNorm.x * right.z,
+                sunDirNorm.x * right.y - sunDirNorm.y * right.x
+            );
+
+            // Ray origin: far above sphere, offset by u,v in perpendicular plane
+            CausticVec3 ro = center - sunDirNorm * (radius * 10.0f) + right * u + forward * v;
+            CausticVec3 rd = sunDirNorm;
+
+            // Find entry point on sphere
+            float tEntry = intersectSphere(ro, rd, center, radius);
+            if (tEntry < 0) continue;
+
+            CausticVec3 hitEntry = ro + rd * tEntry;
+            CausticVec3 normalEntry = (hitEntry - center).normalized();
+
+            // Refract into glass
+            CausticVec3 refracted = refractVec(rd, normalEntry, 1.0f / ior);
+            if (refracted.length() < 0.5f) continue;  // TIR
+
+            // Find exit point
+            float tExit = intersectSphereFar(hitEntry + refracted * 0.001f, refracted, center, radius);
+            if (tExit < 0) continue;
+
+            CausticVec3 hitExit = hitEntry + refracted * (tExit + 0.001f);
+            CausticVec3 normalExit = (hitExit - center).normalized();
+
+            // Refract out of glass
+            CausticVec3 exitDir = refractVec(refracted, normalExit * -1.0f, ior);
+            if (exitDir.length() < 0.5f) continue;  // TIR
+            exitDir = exitDir.normalized();
+
+            // Trace to floor (y = 0)
+            float tFloor = intersectFloor(hitExit, exitDir, 0.0f);
+            if (tFloor < 0 || tFloor > 100.0f) continue;
+
+            CausticVec3 floorHit = hitExit + exitDir * tFloor;
+
+            // Deposit caustic Gaussian at floor hit
+            // Intensity based on focusing - closer = brighter
+            float focusFactor = radius / (tFloor * 0.5f + radius);
+            float intensity = focusFactor * focusFactor * 50.0f;  // Strong caustics
+
+            // Radius based on distance (spreads with distance)
+            float causticRadius = 0.15f + tFloor * 0.05f;
+
+            // Add caustic Gaussian (high radiance, normal points toward floor)
+            // Normal should be opposite of exit direction so it "shines down" onto floor
+            GIGaussian g;
+            g.posX = floorHit.x;
+            g.posY = floorHit.y + 0.05f;  // Slightly above floor
+            g.posZ = floorHit.z;
+            // Normal points down toward floor (opposite of query direction from floor)
+            g.normX = -exitDir.x;
+            g.normY = -exitDir.y;
+            g.normZ = -exitDir.z;
+            g.radius = causticRadius;
+            g.emission = 0;
+            g.radR = sunR * intensity * mat.r;
+            g.radG = sunG * intensity * mat.g;
+            g.radB = sunB * intensity * mat.b;
+            g.setAlbedo(0.9f, 0.9f, 0.9f);
+
+            m_gaussians.push_back(g);
+        }
+    }
+}
+
 void GIGaussianField::getBounds(float& minX, float& minY, float& minZ,
                                  float& maxX, float& maxY, float& maxZ) const {
     if (m_gaussians.empty()) {

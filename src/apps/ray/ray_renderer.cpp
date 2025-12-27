@@ -75,6 +75,12 @@ void RayRenderer::initResources() {
 
             // Build GI Gaussians from CSG primitives
             m_giGaussians.placeOnCSG(m_csgScene, m_materials);
+
+            // Trace caustic photons through glass objects
+            uint32_t preCount = m_giGaussians.count();
+            m_giGaussians.traceCausticPhotons(m_csgScene, m_materials, m_lights.sun, 256);
+            uint32_t causticCount = m_giGaussians.count() - preCount;
+
             if (m_giGaussians.count() > 0) {
                 // Compute direct lighting for Gaussians
                 m_giGaussians.computeDirectLighting(m_lights.sun,
@@ -82,7 +88,11 @@ void RayRenderer::initResources() {
                                                      m_lights.spotLights);
                 // Propagate light between Gaussians (radiosity)
                 m_giGaussians.propagate(3);
-                printf("  GI Gauss:   %u gaussians\n", m_giGaussians.count());
+                printf("  GI Gauss:   %u gaussians", m_giGaussians.count());
+                if (causticCount > 0) {
+                    printf(" (%u caustic)", causticCount);
+                }
+                printf("\n");
             }
 
             sceneLoaded = true;

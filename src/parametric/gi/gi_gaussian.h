@@ -61,6 +61,11 @@ public:
                                const std::vector<Light>& pointLights,
                                const std::vector<SpotLight>& spotLights);
 
+    // Trace caustic photons from sun through glass objects
+    // Deposits high-intensity Gaussians where refracted light hits surfaces
+    void traceCausticPhotons(const CSGScene& scene, const MaterialLibrary& materials,
+                             const SunLight& sun, int photonsPerGlass = 64);
+
     // Propagate light between Gaussians (radiosity iterations)
     void propagate(int iterations = 3);
 

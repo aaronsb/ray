@@ -977,16 +977,9 @@ void main() {
 #if FEATURE_POINT_LIGHTS
             extraLight += evaluatePointLights(hitPoint, normal, floorColor);
 #endif
-#if FEATURE_DIFFUSE_BOUNCE
-            // Quality >= 1 (Preview/Final): bounce for GI
-            // Quality == 0 (Draft): terminate with ambient hack
-            if (pc.qualityLevel >= 1) {
-                color += throughput * (diffuse + extraLight);
-                throughput *= floorColor;
-                ray.origin = hitPoint + normal * EPSILON * 2.0;
-                ray.direction = cosineWeightedHemisphere(normal);
-                continue;
-            }
+#if FEATURE_GAUSSIAN_GI
+            // Gaussian GI includes caustics from glass objects
+            extraLight += queryGaussianGI(hitPoint, normal, floorColor);
 #endif
             color += throughput * (ambient + diffuse + extraLight);
             terminated = true;
