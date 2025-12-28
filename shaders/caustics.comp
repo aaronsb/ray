@@ -78,32 +78,8 @@ layout(std430, binding = 7) readonly buffer InstanceBuffer { BezierInstance inst
 // Rotation utilities (shared with ray.comp)
 #include "includes/transforms.glsl"
 
-// 3D spatial hashing parameters - must match ray.comp exactly
-const float CAUSTIC_CELL_SIZE = 0.08;  // World units per cell (~8cm)
-const uint CAUSTIC_HASH_SIZE = 4194304;  // 4M cells for hash table
-
-// Get cell coordinates for a world position
-ivec3 causticGetCell3D(vec3 pos) {
-    return ivec3(floor(pos / CAUSTIC_CELL_SIZE));
-}
-
-// Hash from cell coordinates directly
-uint cellHash3D(ivec3 cell) {
-    uint hash = uint(cell.x) * 73856093u ^
-                uint(cell.y) * 19349663u ^
-                uint(cell.z) * 83492791u;
-    return hash % CAUSTIC_HASH_SIZE;
-}
-
-// Cell signature: pack cell coords for collision validation
-// Uses 10 bits per axis (range -512 to +511 cells = ±25.6 world units)
-// High bit set to distinguish from empty (0)
-uint cellSignature(ivec3 cell) {
-    uint px = uint(cell.x + 512) & 0x3FFu;
-    uint py = uint(cell.y + 512) & 0x3FFu;
-    uint pz = uint(cell.z + 512) & 0x3FFu;
-    return (px) | (py << 10) | (pz << 20) | 0x80000000u;
-}
+// Spatial hashing functions (shared with ray.comp)
+#include "includes/spatial_hash.glsl"
 
 const uint MAT_GLASS = 2;
 const uint PRIM_SPHERE = 0;
