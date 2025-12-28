@@ -18,9 +18,11 @@ layout(push_constant) uniform PushConstants {
     float lightRadius;
     // Floor parameters
     float floorY;
-    float worldMinX, worldMinZ;
-    float worldMaxX, worldMaxZ;
-    uint _padMap0, _padMap1;  // Padding for alignment
+    // Patch data
+    uint numPatches;
+    uint numBVHNodes;
+    uint numInstances;
+    uint _pad0;
 } pc;
 
 struct CSGPrimitive {
@@ -47,6 +49,50 @@ layout(std430, binding = 2) readonly buffer Materials { Material materials[]; };
 // RGB caustic buffer - 3 uints per cell for atomic accumulation (R, G, B as fixed-point)
 layout(std430, binding = 3) buffer CausticHashMap { uint causticCells[]; };  // [cell*3 + 0]=R, [cell*3 + 1]=G, [cell*3 + 2]=B
 layout(std430, binding = 4) readonly buffer PrimToMaterial { uint primMaterialIds[]; };
+
+// Bezier patch data (for glass teapots, etc.)
+// 16 vec4s per patch (control points, w unused)
+layout(std430, binding = 5) readonly buffer PatchBuffer { vec4 patchData[]; };
+
+// BVH nodes for patches (64 bytes each)
+struct BVHNode {
+    float minX, minY, minZ;
+    uint leftOrFirst;
+    float maxX, maxY, maxZ;
+    uint rightOrCount;
+};
+layout(std430, binding = 6) readonly buffer BVHBuffer { BVHNode bvhNodes[]; };
+
+// Bezier instances (transforms + material)
+struct BezierInstance {
+    vec3 position;
+    float scale;
+    vec3 rotation;  // Euler angles (radians)
+    uint materialId;
+};
+layout(std430, binding = 7) readonly buffer InstanceBuffer { BezierInstance instances[]; };
+
+// ============================================================================
+// Rotation utilities (must match ray.comp)
+// ============================================================================
+mat3 buildRotationMatrix(float rx, float ry, float rz) {
+    float cx = cos(rx), sx = sin(rx);
+    float cy = cos(ry), sy = sin(ry);
+    float cz = cos(rz), sz = sin(rz);
+    return mat3(
+        cy*cz, sx*sy*cz + cx*sz, -cx*sy*cz + sx*sz,
+        -cy*sz, -sx*sy*sz + cx*cz, cx*sy*sz + sx*cz,
+        sy, -sx*cy, cx*cy
+    );
+}
+
+vec3 rotateXYZ(vec3 p, vec3 angles) {
+    return buildRotationMatrix(angles.x, angles.y, angles.z) * p;
+}
+
+vec3 rotateXYZInverse(vec3 p, vec3 angles) {
+    return transpose(buildRotationMatrix(angles.x, angles.y, angles.z)) * p;
+}
 
 // 2D grid parameters - direct indexing, no hash collisions
 // Must match ray.comp exactly
@@ -385,20 +431,109 @@ bool hitTorus(vec3 ro, vec3 rd, vec3 center, float majorR, float minorR,
     return true;
 }
 
+// ============================================================================
+// Bezier Instance AABB hit (for glass teapots, etc.)
+// Uses BVH root bounds as local-space AABB, transforms ray appropriately
+// ============================================================================
+bool hitInstanceAABB(uint instIdx, vec3 ro, vec3 rd,
+                     out float tNear, out float tFar,
+                     out vec3 normalNear, out vec3 normalFar,
+                     out vec3 worldEntry, out vec3 worldExit) {
+    if (pc.numBVHNodes == 0) return false;
+
+    BezierInstance inst = instances[instIdx];
+
+    // Transform ray to local space
+    vec3 localOrigin = rotateXYZInverse(ro - inst.position, inst.rotation) / inst.scale;
+    vec3 localDir = rotateXYZInverse(rd, inst.rotation);
+
+    // Get bounds from BVH root node (local space)
+    vec3 aabbMin = vec3(bvhNodes[0].minX, bvhNodes[0].minY, bvhNodes[0].minZ);
+    vec3 aabbMax = vec3(bvhNodes[0].maxX, bvhNodes[0].maxY, bvhNodes[0].maxZ);
+
+    // Pad slightly to ensure we enclose the surface
+    vec3 pad = (aabbMax - aabbMin) * 0.02;
+    aabbMin -= pad;
+    aabbMax += pad;
+
+    // Box intersection in local space
+    vec3 center = (aabbMin + aabbMax) * 0.5;
+    vec3 half_ = (aabbMax - aabbMin) * 0.5;
+
+    vec3 safeDir = localDir;
+    float minComp = 1e-6;
+    if (abs(safeDir.x) < minComp) safeDir.x = sign(safeDir.x + minComp) * minComp;
+    if (abs(safeDir.y) < minComp) safeDir.y = sign(safeDir.y + minComp) * minComp;
+    if (abs(safeDir.z) < minComp) safeDir.z = sign(safeDir.z + minComp) * minComp;
+
+    vec3 invDir = 1.0 / safeDir;
+    vec3 t1 = (aabbMin - localOrigin) * invDir;
+    vec3 t2 = (aabbMax - localOrigin) * invDir;
+    vec3 tMin = min(t1, t2);
+    vec3 tMax = max(t1, t2);
+    tNear = max(max(tMin.x, tMin.y), tMin.z);
+    tFar = min(min(tMax.x, tMax.y), tMax.z);
+
+    if (tNear > tFar || tFar < 0.0) return false;
+
+    // Local hit points
+    vec3 pNear = localOrigin + tNear * safeDir;
+    vec3 pFar = localOrigin + tFar * safeDir;
+
+    // Entry normal (local space)
+    vec3 localNear = pNear - center;
+    vec3 scaledNear = abs(localNear) / half_;
+    if (scaledNear.x >= scaledNear.y && scaledNear.x >= scaledNear.z) {
+        normalNear = vec3(sign(localNear.x), 0, 0);
+    } else if (scaledNear.y >= scaledNear.z) {
+        normalNear = vec3(0, sign(localNear.y), 0);
+    } else {
+        normalNear = vec3(0, 0, sign(localNear.z));
+    }
+
+    // Exit normal (local space)
+    vec3 localFar = pFar - center;
+    vec3 scaledFar = abs(localFar) / half_;
+    if (scaledFar.x >= scaledFar.y && scaledFar.x >= scaledFar.z) {
+        normalFar = vec3(sign(localFar.x), 0, 0);
+    } else if (scaledFar.y >= scaledFar.z) {
+        normalFar = vec3(0, sign(localFar.y), 0);
+    } else {
+        normalFar = vec3(0, 0, sign(localFar.z));
+    }
+
+    // Transform normals back to world space
+    normalNear = normalize(rotateXYZ(normalNear, inst.rotation));
+    normalFar = normalize(rotateXYZ(normalFar, inst.rotation));
+
+    // Transform hit points to world space
+    worldEntry = rotateXYZ(pNear * inst.scale, inst.rotation) + inst.position;
+    worldExit = rotateXYZ(pFar * inst.scale, inst.rotation) + inst.position;
+
+    // Adjust t values for world-space distance
+    tNear = length(worldEntry - ro);
+    tFar = length(worldExit - ro);
+
+    return true;
+}
+
 // Trace ray through glass, return floor hit position (vec3(-1000) if no hit)
 // Also returns: primitive index, path length through glass, material ID
 vec3 tracePhoton(vec3 ro, vec3 rd, out int hitPrimitive, out float pathLength, out uint matId) {
     hitPrimitive = -1;
     pathLength = 0.0;
     matId = 0;
-    // Find closest glass primitive
+
+    // Find closest glass object (CSG primitive or Bezier instance)
     float bestT = 1e10;
     int bestPrim = -1;
+    int bestInstance = -1;  // -1 = CSG primitive, >= 0 = Bezier instance index
 
+    // Check CSG primitives
     for (uint i = 0; i < pc.numPrimitives; i++) {
-        uint matId = primMaterialIds[i];
-        if (matId >= pc.numMaterials) continue;
-        if (materials[matId].type != MAT_GLASS) continue;
+        uint primMatId = primMaterialIds[i];
+        if (primMatId >= pc.numMaterials) continue;
+        if (materials[primMatId].type != MAT_GLASS) continue;
 
         CSGPrimitive prim = primitives[i];
         CSGTransform xform = transforms[i];
@@ -438,136 +573,188 @@ vec3 tracePhoton(vec3 ro, vec3 rd, out int hitPrimitive, out float pathLength, o
         if (t > 0.0 && t < bestT) {
             bestT = t;
             bestPrim = int(i);
+            bestInstance = -1;  // CSG primitive
         }
     }
 
-    if (bestPrim < 0) return vec3(-1000.0);  // Sentinel for "no hit"
+    // Check Bezier instances (glass teapots, etc.)
+    for (uint i = 0; i < pc.numInstances; i++) {
+        BezierInstance inst = instances[i];
+        if (inst.materialId >= pc.numMaterials) continue;
+        if (materials[inst.materialId].type != MAT_GLASS) continue;
 
-    hitPrimitive = bestPrim;  // Return which primitive was hit
-    matId = primMaterialIds[bestPrim];  // Return material ID for Beer's law
+        float tNear, tFar;
+        vec3 nNear, nFar, wEntry, wExit;
+        if (hitInstanceAABB(i, ro, rd, tNear, tFar, nNear, nFar, wEntry, wExit)) {
+            if (tNear > 0.0 && tNear < bestT) {
+                bestT = tNear;
+                bestPrim = int(i);
+                bestInstance = int(i);  // Bezier instance
+            }
+        }
+    }
+
+    if (bestPrim < 0 && bestInstance < 0) return vec3(-1000.0);  // Sentinel for "no hit"
+
+    hitPrimitive = bestPrim;
+
+    // Get material ID based on hit type
+    if (bestInstance >= 0) {
+        matId = instances[bestInstance].materialId;
+    } else {
+        matId = primMaterialIds[bestPrim];
+    }
 
     // Trace through glass
-    CSGPrimitive prim = primitives[bestPrim];
-    CSGTransform xform = transforms[bestPrim];
-    vec3 center = vec3(prim.x, prim.y, prim.z);
-    float scale = xform.scale;
-
     float ior = materials[matId].ior > 1.0 ? materials[matId].ior : 1.5;
 
-    vec3 hitEntry = ro + rd * bestT;
-    vec3 normalEntry, normalExit, hitExit;
+    vec3 hitEntry, hitExit;
+    vec3 normalEntry, normalExit;
     vec3 refracted;
 
-    if (prim.type == PRIM_SPHERE) {
-        float radius = prim.param0 * scale;
-        normalEntry = normalize(hitEntry - center);
-
-        refracted = refractRay(rd, normalEntry, 1.0 / ior);
-        if (length(refracted) < 0.5) return vec3(-1000.0);
-
-        float tExit = hitSphereFar(hitEntry + refracted * 0.001, refracted, center, radius);
-        if (tExit < 0.0) return vec3(-1000.0);
-
-        hitExit = hitEntry + refracted * (tExit + 0.001);
-        normalExit = normalize(hitExit - center);
-    } else if (prim.type == PRIM_BOX) {
-        vec3 half_ = vec3(prim.param0, prim.param1, prim.param2) * scale;
+    // Handle Bezier instance (glass teapot, etc.) using AABB approximation
+    if (bestInstance >= 0) {
         float tNear, tFar;
-        vec3 nNear, nFar;
-        hitBox(ro, rd, center, half_, tNear, tFar, nNear, nFar);
+        vec3 nNear, nFar, wEntry, wExit;
+        hitInstanceAABB(uint(bestInstance), ro, rd, tNear, tFar, nNear, nFar, wEntry, wExit);
+
+        hitEntry = wEntry;
         normalEntry = nNear;
 
         refracted = refractRay(rd, normalEntry, 1.0 / ior);
         if (length(refracted) < 0.5) return vec3(-1000.0);
 
-        // For box: compute exit directly using the original ray's tFar
-        // This avoids the second hitBox call which can cause multi-bounce artifacts
-        hitExit = ro + rd * tFar;  // Exit point from original entry ray
-
-        // But we need the exit point for the REFRACTED ray, not the original
-        // Use slab intersection directly for the refracted ray
-        vec3 invRef = 1.0 / (refracted + vec3(1e-8));  // Avoid division by zero
-        vec3 t1 = (center - half_ - hitEntry) * invRef;
-        vec3 t2 = (center + half_ - hitEntry) * invRef;
-        vec3 tMax = max(t1, t2);
-        float tExit = min(min(tMax.x, tMax.y), tMax.z);
-
-        if (tExit < 0.001) return vec3(-1000.0);  // No valid exit
-
-        hitExit = hitEntry + refracted * tExit;
-
-        // Exit normal from position
-        vec3 local = hitExit - center;
-        vec3 normHalf = abs(local) / half_;
-        if (normHalf.x >= normHalf.y && normHalf.x >= normHalf.z) {
-            normalExit = vec3(sign(local.x), 0.0, 0.0);
-        } else if (normHalf.y >= normHalf.z) {
-            normalExit = vec3(0.0, sign(local.y), 0.0);
+        // For AABB approximation, use direct path through box
+        // Re-trace with refracted ray to find exit
+        float tN2, tF2;
+        vec3 nN2, nF2, wE2, wX2;
+        if (!hitInstanceAABB(uint(bestInstance), hitEntry + refracted * 0.01, refracted,
+                             tN2, tF2, nN2, nF2, wE2, wX2)) {
+            // Fallback: use original exit point
+            hitExit = wExit;
+            normalExit = nFar;
         } else {
-            normalExit = vec3(0.0, 0.0, sign(local.z));
+            hitExit = wX2;
+            normalExit = nF2;
         }
 
         hitExit = hitExit + normalExit * 0.001;  // Push slightly outside
-    } else if (prim.type == PRIM_CYLINDER) {
-        float radius = prim.param0 * scale;
-        float height = prim.param1 * scale;
-        float tNear, tFar;
-        vec3 nNear, nFar;
-        hitCylinder(ro, rd, center, radius, height, tNear, tFar, nNear, nFar);
-        normalEntry = nNear;
-
-        refracted = refractRay(rd, normalEntry, 1.0 / ior);
-        if (length(refracted) < 0.5) return vec3(-1000.0);
-
-        float tN2, tF2;
-        vec3 nN2, nF2;
-        if (!hitCylinder(hitEntry + refracted * 0.01, refracted, center, radius, height, tN2, tF2, nN2, nF2)) {
-            return vec3(-1000.0);
-        }
-
-        hitExit = hitEntry + refracted * (tF2 + 0.01);
-        normalExit = nF2;
-    } else if (prim.type == PRIM_CONE) {
-        float radius = prim.param0 * scale;
-        float height = prim.param1 * scale;
-        float tNear, tFar;
-        vec3 nNear, nFar;
-        hitCone(ro, rd, center, radius, height, tNear, tFar, nNear, nFar);
-        normalEntry = nNear;
-
-        refracted = refractRay(rd, normalEntry, 1.0 / ior);
-        if (length(refracted) < 0.5) return vec3(-1000.0);
-
-        float tN2, tF2;
-        vec3 nN2, nF2;
-        if (!hitCone(hitEntry + refracted * 0.01, refracted, center, radius, height, tN2, tF2, nN2, nF2)) {
-            return vec3(-1000.0);
-        }
-
-        hitExit = hitEntry + refracted * (tF2 + 0.01);
-        normalExit = nF2;
-    } else if (prim.type == PRIM_TORUS) {
-        float majorR = prim.param0 * scale;
-        float minorR = prim.param1 * scale;
-        float tNear, tFar;
-        vec3 nNear, nFar;
-        hitTorus(ro, rd, center, majorR, minorR, tNear, tFar, nNear, nFar);
-        normalEntry = nNear;
-
-        refracted = refractRay(rd, normalEntry, 1.0 / ior);
-        if (length(refracted) < 0.5) return vec3(-1000.0);
-
-        float tN2, tF2;
-        vec3 nN2, nF2;
-        if (!hitTorus(hitEntry + refracted * 0.01, refracted, center, majorR, minorR, tN2, tF2, nN2, nF2)) {
-            return vec3(-1000.0);
-        }
-
-        hitExit = hitEntry + refracted * (tF2 + 0.01);
-        normalExit = nF2;
-    } else {
-        return vec3(-1000.0);  // Unknown primitive type
     }
+    // Handle CSG primitives
+    else {
+        CSGPrimitive prim = primitives[bestPrim];
+        CSGTransform xform = transforms[bestPrim];
+        vec3 center = vec3(prim.x, prim.y, prim.z);
+        float scale = xform.scale;
+
+        hitEntry = ro + rd * bestT;
+
+        if (prim.type == PRIM_SPHERE) {
+            float radius = prim.param0 * scale;
+            normalEntry = normalize(hitEntry - center);
+
+            refracted = refractRay(rd, normalEntry, 1.0 / ior);
+            if (length(refracted) < 0.5) return vec3(-1000.0);
+
+            float tExit = hitSphereFar(hitEntry + refracted * 0.001, refracted, center, radius);
+            if (tExit < 0.0) return vec3(-1000.0);
+
+            hitExit = hitEntry + refracted * (tExit + 0.001);
+            normalExit = normalize(hitExit - center);
+        } else if (prim.type == PRIM_BOX) {
+            vec3 half_ = vec3(prim.param0, prim.param1, prim.param2) * scale;
+            float tNear, tFar;
+            vec3 nNear, nFar;
+            hitBox(ro, rd, center, half_, tNear, tFar, nNear, nFar);
+            normalEntry = nNear;
+
+            refracted = refractRay(rd, normalEntry, 1.0 / ior);
+            if (length(refracted) < 0.5) return vec3(-1000.0);
+
+            // Use slab intersection for refracted ray exit
+            vec3 invRef = 1.0 / (refracted + vec3(1e-8));
+            vec3 t1 = (center - half_ - hitEntry) * invRef;
+            vec3 t2 = (center + half_ - hitEntry) * invRef;
+            vec3 tMax = max(t1, t2);
+            float tExit = min(min(tMax.x, tMax.y), tMax.z);
+
+            if (tExit < 0.001) return vec3(-1000.0);
+
+            hitExit = hitEntry + refracted * tExit;
+
+            // Exit normal from position
+            vec3 local = hitExit - center;
+            vec3 normHalf = abs(local) / half_;
+            if (normHalf.x >= normHalf.y && normHalf.x >= normHalf.z) {
+                normalExit = vec3(sign(local.x), 0.0, 0.0);
+            } else if (normHalf.y >= normHalf.z) {
+                normalExit = vec3(0.0, sign(local.y), 0.0);
+            } else {
+                normalExit = vec3(0.0, 0.0, sign(local.z));
+            }
+
+            hitExit = hitExit + normalExit * 0.001;
+        } else if (prim.type == PRIM_CYLINDER) {
+            float radius = prim.param0 * scale;
+            float height = prim.param1 * scale;
+            float tNear, tFar;
+            vec3 nNear, nFar;
+            hitCylinder(ro, rd, center, radius, height, tNear, tFar, nNear, nFar);
+            normalEntry = nNear;
+
+            refracted = refractRay(rd, normalEntry, 1.0 / ior);
+            if (length(refracted) < 0.5) return vec3(-1000.0);
+
+            float tN2, tF2;
+            vec3 nN2, nF2;
+            if (!hitCylinder(hitEntry + refracted * 0.01, refracted, center, radius, height, tN2, tF2, nN2, nF2)) {
+                return vec3(-1000.0);
+            }
+
+            hitExit = hitEntry + refracted * (tF2 + 0.01);
+            normalExit = nF2;
+        } else if (prim.type == PRIM_CONE) {
+            float radius = prim.param0 * scale;
+            float height = prim.param1 * scale;
+            float tNear, tFar;
+            vec3 nNear, nFar;
+            hitCone(ro, rd, center, radius, height, tNear, tFar, nNear, nFar);
+            normalEntry = nNear;
+
+            refracted = refractRay(rd, normalEntry, 1.0 / ior);
+            if (length(refracted) < 0.5) return vec3(-1000.0);
+
+            float tN2, tF2;
+            vec3 nN2, nF2;
+            if (!hitCone(hitEntry + refracted * 0.01, refracted, center, radius, height, tN2, tF2, nN2, nF2)) {
+                return vec3(-1000.0);
+            }
+
+            hitExit = hitEntry + refracted * (tF2 + 0.01);
+            normalExit = nF2;
+        } else if (prim.type == PRIM_TORUS) {
+            float majorR = prim.param0 * scale;
+            float minorR = prim.param1 * scale;
+            float tNear, tFar;
+            vec3 nNear, nFar;
+            hitTorus(ro, rd, center, majorR, minorR, tNear, tFar, nNear, nFar);
+            normalEntry = nNear;
+
+            refracted = refractRay(rd, normalEntry, 1.0 / ior);
+            if (length(refracted) < 0.5) return vec3(-1000.0);
+
+            float tN2, tF2;
+            vec3 nN2, nF2;
+            if (!hitTorus(hitEntry + refracted * 0.01, refracted, center, majorR, minorR, tN2, tF2, nN2, nF2)) {
+                return vec3(-1000.0);
+            }
+
+            hitExit = hitEntry + refracted * (tF2 + 0.01);
+            normalExit = nF2;
+        } else {
+            return vec3(-1000.0);  // Unknown primitive type
+        }
+    }  // End of CSG primitive handling
 
     // Calculate path length through glass for Beer's law
     pathLength = length(hitExit - hitEntry);

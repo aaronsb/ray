@@ -860,6 +860,7 @@ void RayRenderer::createComputePipeline() {
 
 #if FEATURE_GPU_CAUSTICS
 // Push constants for caustics shader (area-ratio method)
+// Must match caustics.comp exactly!
 struct CausticsPushConstants {
     uint32_t gridWidth;
     uint32_t gridHeight;
@@ -871,9 +872,11 @@ struct CausticsPushConstants {
     uint32_t lightType;  // 0=directional, 1=point, 2=spot
     float lightRadius;
     float floorY;
-    float worldMinX, worldMinZ;
-    float worldMaxX, worldMaxZ;
-    uint32_t _padMap0, _padMap1;  // Padding for alignment
+    // Patch data (for glass teapots, etc.)
+    uint32_t numPatches;
+    uint32_t numBVHNodes;
+    uint32_t numInstances;
+    uint32_t _pad0;
 };
 
 void RayRenderer::createCausticsPipeline() {
@@ -886,18 +889,18 @@ void RayRenderer::createCausticsPipeline() {
                  m_causticHashBuffer, m_causticHashBufferMemory);
     printf("  Created caustic hash buffer: %u cells, RGB (%.1f KB)\n", CAUSTIC_GRID_CELLS, hashBufSize / 1024.0f);
 
-    // Create descriptor set layout for caustics (9 bindings)
-    // 0: Primitives, 1: Transforms, 2: Materials, 3: CausticHash (buffer), 4: PrimToMaterial
-    // 5: Patches, 6: BVH, 7: PatchIndices, 8: Instances
-    std::array<VkDescriptorSetLayoutBinding, 9> bindings{};
+    // Create descriptor set layout for caustics (8 bindings)
+    // 0: Primitives, 1: Transforms, 2: Materials, 3: CausticHash, 4: PrimToMaterial
+    // 5: Patches, 6: BVH, 7: Instances
+    std::array<VkDescriptorSetLayoutBinding, 8> bindings{};
 
-    // Binding 0: Primitives
+    // Binding 0: CSG Primitives
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[0].descriptorCount = 1;
     bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
-    // Binding 1: Transforms
+    // Binding 1: CSG Transforms
     bindings[1].binding = 1;
     bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[1].descriptorCount = 1;
@@ -921,29 +924,23 @@ void RayRenderer::createCausticsPipeline() {
     bindings[4].descriptorCount = 1;
     bindings[4].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
-    // Binding 5: Patches
+    // Binding 5: Bezier Patches (control points)
     bindings[5].binding = 5;
     bindings[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[5].descriptorCount = 1;
     bindings[5].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
-    // Binding 6: BVH
+    // Binding 6: Patch BVH nodes
     bindings[6].binding = 6;
     bindings[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[6].descriptorCount = 1;
     bindings[6].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
-    // Binding 7: Patch indices
+    // Binding 7: Bezier Instances (transforms + material)
     bindings[7].binding = 7;
     bindings[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[7].descriptorCount = 1;
     bindings[7].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-
-    // Binding 8: Instances
-    bindings[8].binding = 8;
-    bindings[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[8].descriptorCount = 1;
-    bindings[8].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -955,10 +952,10 @@ void RayRenderer::createCausticsPipeline() {
         return;
     }
 
-    // Create descriptor pool (9 storage buffers)
+    // Create descriptor pool (8 storage buffers)
     std::array<VkDescriptorPoolSize, 1> poolSizes{};
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    poolSizes[0].descriptorCount = 9;
+    poolSizes[0].descriptorCount = 8;
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -1040,7 +1037,22 @@ void RayRenderer::createCausticsPipeline() {
     primMatInfo.offset = 0;
     primMatInfo.range = VK_WHOLE_SIZE;
 
-    std::array<VkWriteDescriptorSet, 5> writes{};
+    VkDescriptorBufferInfo patchInfo{};
+    patchInfo.buffer = m_patchBuffer;
+    patchInfo.offset = 0;
+    patchInfo.range = VK_WHOLE_SIZE;
+
+    VkDescriptorBufferInfo bvhInfo{};
+    bvhInfo.buffer = m_bvhBuffer;
+    bvhInfo.offset = 0;
+    bvhInfo.range = VK_WHOLE_SIZE;
+
+    VkDescriptorBufferInfo instanceInfo{};
+    instanceInfo.buffer = m_instanceBuffer;
+    instanceInfo.offset = 0;
+    instanceInfo.range = VK_WHOLE_SIZE;
+
+    std::array<VkWriteDescriptorSet, 8> writes{};
 
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[0].dstSet = m_causticsDescriptorSet;
@@ -1076,6 +1088,27 @@ void RayRenderer::createCausticsPipeline() {
     writes[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     writes[4].descriptorCount = 1;
     writes[4].pBufferInfo = &primMatInfo;
+
+    writes[5].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[5].dstSet = m_causticsDescriptorSet;
+    writes[5].dstBinding = 5;
+    writes[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[5].descriptorCount = 1;
+    writes[5].pBufferInfo = &patchInfo;
+
+    writes[6].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[6].dstSet = m_causticsDescriptorSet;
+    writes[6].dstBinding = 6;
+    writes[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[6].descriptorCount = 1;
+    writes[6].pBufferInfo = &bvhInfo;
+
+    writes[7].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[7].dstSet = m_causticsDescriptorSet;
+    writes[7].dstBinding = 7;
+    writes[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[7].descriptorCount = 1;
+    writes[7].pBufferInfo = &instanceInfo;
 
     m_devFuncs->vkUpdateDescriptorSets(dev, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 
@@ -1158,9 +1191,29 @@ void RayRenderer::runCausticsPass() {
     printf("  Caustics: %d refractive primitives out of %zu total, floor Y=%.1f\n",
            refractiveCount, prims.size(), m_floor.y);
 
+    // Count refractive Bezier instances (glass teapots, etc.)
+    int refractiveInstCount = 0;
+    const auto& mats = m_materials.materials();
+    for (size_t i = 0; i < m_instances.size(); i++) {
+        const auto& inst = m_instances[i];
+        if (inst.materialId < mats.size()) {
+            const auto& mat = mats[inst.materialId];
+            if (mat.ior > 1.001f) {
+                refractiveInstCount++;
+                printf("  Caustics: refractive instance %zu (IOR=%.2f) at (%.1f, %.1f, %.1f)\n",
+                       i, mat.ior, inst.posX, inst.posY, inst.posZ);
+            }
+        }
+    }
+    if (!m_instances.empty()) {
+        printf("  Caustics: %d refractive instances out of %zu total\n",
+               refractiveInstCount, m_instances.size());
+    }
+
     // Skip caustic pass if no refractive materials (IOR > 1.0)
     // Metals have complex IOR (reflect, don't refract) - only dielectrics cause caustics
-    if (refractiveCount == 0) {
+    int totalRefractive = refractiveCount + refractiveInstCount;
+    if (totalRefractive == 0) {
         printf("  Caustics: no refractive materials (IOR > 1.0), skipping pass\n");
         m_causticsNeedUpdate = false;
         return;
@@ -1214,12 +1267,11 @@ void RayRenderer::runCausticsPass() {
     pc.lightType = 0;  // Directional
     pc.lightRadius = 0.0f;
     pc.floorY = m_floor.y;
-    pc.worldMinX = worldMinX;
-    pc.worldMinZ = worldMinZ;
-    pc.worldMaxX = worldMaxX;
-    pc.worldMaxZ = worldMaxZ;
-    pc._padMap0 = 0;
-    pc._padMap1 = 0;
+    // Patch data for glass teapots, etc.
+    pc.numPatches = m_patchGroup.subPatchCount();
+    pc.numBVHNodes = m_patchGroup.bvhNodeCount();
+    pc.numInstances = static_cast<uint32_t>(m_instances.size());
+    pc._pad0 = 0;
 
     // Create command buffer for caustics pass
     VkCommandBufferAllocateInfo cmdAllocInfo{};
