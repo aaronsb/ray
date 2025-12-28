@@ -352,6 +352,13 @@ void RayRenderer::startNextFrame() {
     m_window->setTitle(QString("Ray's Bouncy Castle - %1x%2 - %3 fps")
         .arg(sz.width()).arg(sz.height()).arg(static_cast<int>(m_fps)));
 
+#if FEATURE_GPU_CAUSTICS
+    // Real-time caustics update (when sun moves, etc.)
+    if (m_causticsRealTime && m_causticsNeedUpdate) {
+        runCausticsPass();
+    }
+#endif
+
     VkCommandBuffer cmdBuf = m_window->currentCommandBuffer();
     recordComputeCommands(cmdBuf);
 
@@ -872,11 +879,14 @@ struct CausticsPushConstants {
     uint32_t lightType;  // 0=directional, 1=point, 2=spot
     float lightRadius;
     float floorY;
-    // Patch data (for glass teapots, etc.)
+    // Patch data (for dielectric teapots, etc.)
     uint32_t numPatches;
     uint32_t numBVHNodes;
     uint32_t numInstances;
     uint32_t _pad0;
+    // Camera position for focusing ray grid on visible area
+    float camPosX, camPosY, camPosZ;
+    float _pad1;
 };
 
 void RayRenderer::createCausticsPipeline() {
@@ -887,7 +897,7 @@ void RayRenderer::createCausticsPipeline() {
     createBuffer(hashBufSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                  m_causticHashBuffer, m_causticHashBufferMemory);
-    printf("  Created caustic hash buffer: %u cells, RGB (%.1f KB)\n", CAUSTIC_GRID_CELLS, hashBufSize / 1024.0f);
+    printf("  Created caustic hash buffer: %u cells, RGB (%.1f KB)\n", CAUSTIC_HASH_CELLS, hashBufSize / 1024.0f);
 
     // Create descriptor set layout for caustics (8 bindings)
     // 0: Primitives, 1: Transforms, 2: Materials, 3: CausticHash, 4: PrimToMaterial
@@ -1156,16 +1166,17 @@ void RayRenderer::createCausticsPipeline() {
 void RayRenderer::runCausticsPass() {
     if (!m_causticsPipeline || !m_causticsNeedUpdate) return;
     if (m_csgScene.primitiveCount() == 0) {
-        printf("  Caustics: no CSG primitives, skipping\n");
+        if (!m_causticsRealTime) printf("  Caustics: no CSG primitives, skipping\n");
         return;
     }
-    if (!m_floor.enabled) {
-        printf("  Caustics: no floor, skipping\n");
-        return;
-    }
+    // Note: floor is optional - caustics now trace to any opaque geometry
 
-    // Count refractive primitives (materials with real IOR > 1.0)
-    // This includes glass, water, plastic, jello, etc. - any dielectric
+    // Only print verbose output when not in real-time mode
+    bool verbose = !m_causticsRealTime;
+
+    // Count refractive primitives - dielectrics with real/rational IOR > 1.0
+    // This includes glass, water, plastic, jello, gems, etc. - any transparent material
+    // Metals have complex IOR (real + imaginary parts) and only reflect, not refract
     int refractiveCount = 0;
     const auto& prims = m_csgScene.primitives();
     const auto& nodes = m_csgScene.nodes();
@@ -1177,35 +1188,41 @@ void RayRenderer::runCausticsPass() {
             uint32_t matId = node.materialId;
             if (primIdx < prims.size() && matId < m_materials.count()) {
                 const auto& mat = m_materials.materials()[matId];
-                // Check for real IOR > 1.0 (refractive materials)
-                // Metals have IOR but it's complex (imaginary component) - they reflect, not refract
-                // Diffuse materials typically have IOR=1.0 or unused
-                if (mat.ior > 1.001f) {  // Small epsilon to avoid float comparison issues
+                // Check for dielectric materials (type 2) with real IOR > 1.0
+                // These have rational/real IOR (refractive) vs metals with complex IOR (reflective only)
+                if (mat.type == 2 && mat.ior > 1.001f) {
                     refractiveCount++;
-                    printf("  Caustics: refractive prim %u (IOR=%.2f) at (%.1f, %.1f, %.1f)\n",
+                    if (verbose) printf("  Caustics: refractive prim %u (IOR=%.2f) at (%.1f, %.1f, %.1f)\n",
                            primIdx, mat.ior, prims[primIdx].x, prims[primIdx].y, prims[primIdx].z);
                 }
             }
         }
     }
-    printf("  Caustics: %d refractive primitives out of %zu total, floor Y=%.1f\n",
-           refractiveCount, prims.size(), m_floor.y);
+    if (verbose) {
+        if (m_floor.enabled) {
+            printf("  Caustics: %d refractive primitives out of %zu total, floor Y=%.1f\n",
+                   refractiveCount, prims.size(), m_floor.y);
+        } else {
+            printf("  Caustics: %d refractive primitives out of %zu total (no floor, using geometry)\n",
+                   refractiveCount, prims.size());
+        }
+    }
 
-    // Count refractive Bezier instances (glass teapots, etc.)
+    // Count refractive Bezier instances (dielectric teapots, etc.)
     int refractiveInstCount = 0;
     const auto& mats = m_materials.materials();
     for (size_t i = 0; i < m_instances.size(); i++) {
         const auto& inst = m_instances[i];
         if (inst.materialId < mats.size()) {
             const auto& mat = mats[inst.materialId];
-            if (mat.ior > 1.001f) {
+            if (mat.type == 2 && mat.ior > 1.001f) {
                 refractiveInstCount++;
-                printf("  Caustics: refractive instance %zu (IOR=%.2f) at (%.1f, %.1f, %.1f)\n",
+                if (verbose) printf("  Caustics: refractive instance %zu (IOR=%.2f) at (%.1f, %.1f, %.1f)\n",
                        i, mat.ior, inst.posX, inst.posY, inst.posZ);
             }
         }
     }
-    if (!m_instances.empty()) {
+    if (verbose && !m_instances.empty()) {
         printf("  Caustics: %d refractive instances out of %zu total\n",
                refractiveInstCount, m_instances.size());
     }
@@ -1214,7 +1231,7 @@ void RayRenderer::runCausticsPass() {
     // Metals have complex IOR (reflect, don't refract) - only dielectrics cause caustics
     int totalRefractive = refractiveCount + refractiveInstCount;
     if (totalRefractive == 0) {
-        printf("  Caustics: no refractive materials (IOR > 1.0), skipping pass\n");
+        if (verbose) printf("  Caustics: no refractive materials (IOR > 1.0), skipping pass\n");
         m_causticsNeedUpdate = false;
         return;
     }
@@ -1224,7 +1241,7 @@ void RayRenderer::runCausticsPass() {
     // Get sun direction (direction TO sun, so negate for direction FROM sun)
     float sunDirX, sunDirY, sunDirZ;
     m_lights.sun.getDirection(sunDirX, sunDirY, sunDirZ);
-    printf("  Caustics: sun dir FROM sun = (%.3f, %.3f, %.3f)\n",
+    if (verbose) printf("  Caustics: sun dir FROM sun = (%.3f, %.3f, %.3f)\n",
            -sunDirX, -sunDirY, -sunDirZ);
 
     // Compute world bounds for caustic map coverage
@@ -1251,8 +1268,10 @@ void RayRenderer::runCausticsPass() {
 
     // Set up push constants for sun light (directional)
     CausticsPushConstants pc{};
-    pc.gridWidth = 1024;   // Ray grid resolution (higher = more photons)
-    pc.gridHeight = 1024;  // 1M+ photons total
+    // Photon grid: 512² for real-time (speed), 1024² for static (quality)
+    uint32_t gridSize = m_causticsRealTime ? 512 : 1024;
+    pc.gridWidth = gridSize;
+    pc.gridHeight = gridSize;
     pc.numPrimitives = m_csgScene.primitiveCount();
     pc.numMaterials = m_materials.count();
     // Light position (not used for directional, but set high above scene)
@@ -1272,6 +1291,9 @@ void RayRenderer::runCausticsPass() {
     pc.numBVHNodes = m_patchGroup.bvhNodeCount();
     pc.numInstances = static_cast<uint32_t>(m_instances.size());
     pc._pad0 = 0;
+    // Camera position - focus ray grid near where camera is looking
+    m_camera.getPosition(pc.camPosX, pc.camPosY, pc.camPosZ);
+    pc._pad1 = 0;
 
     // Create command buffer for caustics pass
     VkCommandBufferAllocateInfo cmdAllocInfo{};
@@ -1338,8 +1360,12 @@ void RayRenderer::runCausticsPass() {
     m_devFuncs->vkDestroyFence(dev, fence, nullptr);
     m_devFuncs->vkFreeCommandBuffers(dev, m_window->graphicsCommandPool(), 1, &cmdBuf);
 
-    printf("  Caustics pass complete (%ux%u photons -> %u cell RGB hash)\n", pc.gridWidth, pc.gridHeight, CAUSTIC_GRID_CELLS);
-    m_causticsNeedUpdate = false;
+    if (verbose) {
+        printf("  Caustics pass complete (%ux%u photons -> %u cell 3D hash)\n", pc.gridWidth, pc.gridHeight, CAUSTIC_HASH_CELLS);
+    }
+    if (!m_causticsRealTime) {
+        m_causticsNeedUpdate = false;
+    }
 }
 #endif // FEATURE_GPU_CAUSTICS
 
@@ -1501,6 +1527,58 @@ void RayRenderer::createLightBuffer() {
         memcpy(data, lights.data(), lights.size() * sizeof(Light));
         m_devFuncs->vkUnmapMemory(dev, m_lightBufferMemory);
     }
+}
+
+void RayRenderer::updateLightBuffer() {
+    if (!m_lightBuffer || !m_lightBufferMemory) return;
+
+    VkDevice dev = m_window->device();
+    std::vector<Light> lights = m_lights.buildBuffer();
+
+    if (!lights.empty()) {
+        void* data;
+        m_devFuncs->vkMapMemory(dev, m_lightBufferMemory, 0, lights.size() * sizeof(Light), 0, &data);
+        memcpy(data, lights.data(), lights.size() * sizeof(Light));
+        m_devFuncs->vkUnmapMemory(dev, m_lightBufferMemory);
+    }
+}
+
+void RayRenderer::toggleRealTimeCaustics() {
+    m_causticsRealTime = !m_causticsRealTime;
+    m_causticsNeedUpdate = true;
+    if (m_causticsRealTime) {
+        printf("Real-time caustics: ON\n");
+    } else {
+        printf("Real-time caustics: OFF\n");
+        // Run high-quality pass immediately when turning off real-time mode
+        runCausticsPass();
+    }
+    m_window->requestUpdate();
+}
+
+void RayRenderer::adjustSunAzimuth(float deltaDegrees) {
+    if (!hasSun()) return;
+    m_lights.sun.azimuth += deltaDegrees;
+    // Wrap around 0-360
+    if (m_lights.sun.azimuth < 0.0f) m_lights.sun.azimuth += 360.0f;
+    if (m_lights.sun.azimuth >= 360.0f) m_lights.sun.azimuth -= 360.0f;
+    updateLightBuffer();
+    m_causticsNeedUpdate = true;
+    m_frameIndex = 0;  // Reset accumulation
+    printf("Sun: az=%.1f° el=%.1f°\n", m_lights.sun.azimuth, m_lights.sun.elevation);
+    m_window->requestUpdate();
+}
+
+void RayRenderer::adjustSunElevation(float deltaDegrees) {
+    if (!hasSun()) return;
+    m_lights.sun.elevation += deltaDegrees;
+    // Clamp to 0-90 (below horizon doesn't make sense for caustics)
+    m_lights.sun.elevation = std::max(0.0f, std::min(90.0f, m_lights.sun.elevation));
+    updateLightBuffer();
+    m_causticsNeedUpdate = true;
+    m_frameIndex = 0;  // Reset accumulation
+    printf("Sun: az=%.1f° el=%.1f°\n", m_lights.sun.azimuth, m_lights.sun.elevation);
+    m_window->requestUpdate();
 }
 
 void RayRenderer::createEmissiveLightBuffer() {
@@ -1971,6 +2049,20 @@ void RayWindow::keyPressEvent(QKeyEvent* event) {
     } else if (event->key() == Qt::Key_3 && m_renderer) {
         m_renderer->setQualityLevel(2);
         printf("Quality: Final (8 bounces)\n");
+    } else if (event->key() == Qt::Key_C && m_renderer) {
+        m_renderer->toggleRealTimeCaustics();
+    } else if (event->key() == Qt::Key_BracketLeft && m_renderer) {
+        // [ - rotate sun counterclockwise (azimuth)
+        m_renderer->adjustSunAzimuth(-5.0f);
+    } else if (event->key() == Qt::Key_BracketRight && m_renderer) {
+        // ] - rotate sun clockwise (azimuth)
+        m_renderer->adjustSunAzimuth(5.0f);
+    } else if (event->key() == Qt::Key_BraceLeft && m_renderer) {
+        // { - lower sun (elevation)
+        m_renderer->adjustSunElevation(-5.0f);
+    } else if (event->key() == Qt::Key_BraceRight && m_renderer) {
+        // } - raise sun (elevation)
+        m_renderer->adjustSunElevation(5.0f);
     }
 }
 

@@ -150,6 +150,14 @@ public:
     }
     uint32_t qualityLevel() const { return m_qualityLevel; }
 
+    void toggleRealTimeCaustics();
+    bool realTimeCaustics() const { return m_causticsRealTime; }
+
+    // Sun position controls - only active if scene has sun (intensity > 0)
+    bool hasSun() const { return m_lights.sun.intensity > 0.0f; }
+    void adjustSunAzimuth(float deltaDegrees);
+    void adjustSunElevation(float deltaDegrees);
+
     bool saveScreenshot(const QString& filename);
 
 private:
@@ -247,7 +255,7 @@ private:
     // Skipped for: metals (complex IOR, reflect only), diffuse (no refraction)
     // Future optimizations to consider:
     //   - Camera-distance cascaded caustic maps for quality/perf tradeoff
-    //   - Coarse LOD patches for distant Bezier glass objects
+    //   - Coarse LOD patches for distant Bezier dielectric objects
     //   - Temporal reprojection for stable caustics during motion
     VkPipeline m_causticsPipeline = VK_NULL_HANDLE;
     VkPipelineLayout m_causticsPipelineLayout = VK_NULL_HANDLE;
@@ -256,12 +264,13 @@ private:
     VkDescriptorSet m_causticsDescriptorSet = VK_NULL_HANDLE;
     VkBuffer m_causticsPrimMaterialBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_causticsPrimMaterialBufferMemory = VK_NULL_HANDLE;
-    // Caustic hash buffer (spatial hashing with atomics)
+    // Caustic hash buffer (3D spatial hashing with signature validation)
     VkBuffer m_causticHashBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_causticHashBufferMemory = VK_NULL_HANDLE;
-    static constexpr uint32_t CAUSTIC_GRID_CELLS = 262144;  // 512x512 grid, must match shader
-    static constexpr uint32_t CAUSTIC_HASH_SIZE = CAUSTIC_GRID_CELLS * 3;  // RGB (3 uints per cell)
+    static constexpr uint32_t CAUSTIC_HASH_CELLS = 4194304;  // 4M cells for 3D spatial hash
+    static constexpr uint32_t CAUSTIC_HASH_SIZE = CAUSTIC_HASH_CELLS * 4;  // [signature, R, G, B] per cell
     bool m_causticsNeedUpdate = true;
+    bool m_causticsRealTime = false;  // Real-time mode: update every frame
 
     // Frame tracking
     uint32_t m_frameIndex = 0;
@@ -279,6 +288,7 @@ private:
     void createCSGBuffers();
     void createMaterialBuffer();
     void createLightBuffer();
+    void updateLightBuffer();
     void createEmissiveLightBuffer();
     void createGaussianBuffer();
     void createDescriptorSet();

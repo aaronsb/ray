@@ -17,9 +17,16 @@ cmake --build build
 **Options:**
 - `-h, --help` - Display help
 - `-v, --version` - Display version
+- `-s, --scene <file>` - Scene file to load (.scene format)
 - `--screenshot <filename>` - Take screenshot on start and exit (filename optional)
 - `--frames <count>` - Frames to accumulate before screenshot (default: 30)
 - `--no-exit` - Keep window open after screenshot
+- `-d, --debug` - Enable Vulkan validation layers
+
+**Example:**
+```bash
+./build/ray -s scenes/caustics.scene --screenshot /tmp/test.png --frames 30
+```
 
 **Controls:**
 - Left-click drag: Rotate camera (orbit)

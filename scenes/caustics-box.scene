@@ -1,0 +1,32 @@
+; Caustics on 3D Box Surface
+; Tests 3D spatial hashing by projecting caustics onto a box instead of floor
+
+; Glass materials
+(material clear-glass (type glass) (rgb 0.98 0.98 1.0) (ior 1.5))
+(material red-glass (type glass) (rgb 1.0 0.3 0.3) (ior 1.8))
+(material blue-glass (type glass) (rgb 0.3 0.4 1.0) (ior 1.8))
+
+; Surface material
+(material gray (type diffuse) (rgb 0.5 0.5 0.5))
+(material white (type diffuse) (rgb 0.9 0.9 0.9))
+
+; Sun for caustics
+(sun (azimuth 45) (elevation 50) (intensity 1.5) (color 1.0 0.98 0.92) (ambient 0.05))
+
+; NO floor - we use a box instead
+; (floor (y 0) gray)
+
+; Large flat box as caustic receiver surface
+(shape (box (at 0 -0.5 0) (half 12 0.5 12)) gray)
+
+; Some angled boxes to catch caustics on vertical/angled surfaces
+(shape (box (at -6 1.5 -3) (half 0.3 1.5 3) (rotate 0 0 15)) white)
+(shape (box (at 6 1.5 -3) (half 0.3 1.5 3) (rotate 0 0 -15)) white)
+
+; Glass objects
+(shape (sphere (at 0 2 0) (r 1.0)) clear-glass)
+(shape (sphere (at -3 1.5 2) (r 0.8)) red-glass)
+(shape (sphere (at 3 1.5 2) (r 0.8)) blue-glass)
+
+; Glass cube for interesting caustic pattern
+(shape (box (at 0 1.5 4) (half 0.6 0.6 0.6)) clear-glass)

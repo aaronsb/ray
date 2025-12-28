@@ -1,7 +1,7 @@
 #version 450
 
 // Caustic Photon Mapping with Spatial Hashing
-// Traces photons from light through glass, accumulates in hash grid using atomics
+// Traces photons from light through dielectrics, accumulates in hash grid using atomics
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
@@ -23,6 +23,9 @@ layout(push_constant) uniform PushConstants {
     uint numBVHNodes;
     uint numInstances;
     uint _pad0;
+    // Camera position - ray grid centers near camera for focused caustics
+    float camPosX, camPosY, camPosZ;
+    float _pad1;
 } pc;
 
 struct CSGPrimitive {
@@ -50,7 +53,7 @@ layout(std430, binding = 2) readonly buffer Materials { Material materials[]; };
 layout(std430, binding = 3) buffer CausticHashMap { uint causticCells[]; };  // [cell*3 + 0]=R, [cell*3 + 1]=G, [cell*3 + 2]=B
 layout(std430, binding = 4) readonly buffer PrimToMaterial { uint primMaterialIds[]; };
 
-// Bezier patch data (for glass teapots, etc.)
+// Bezier patch data (for dielectric teapots, etc.)
 // 16 vec4s per patch (control points, w unused)
 layout(std430, binding = 5) readonly buffer PatchBuffer { vec4 patchData[]; };
 
@@ -94,21 +97,31 @@ vec3 rotateXYZInverse(vec3 p, vec3 angles) {
     return transpose(buildRotationMatrix(angles.x, angles.y, angles.z)) * p;
 }
 
-// 2D grid parameters - direct indexing, no hash collisions
-// Must match ray.comp exactly
-const float CAUSTIC_WORLD_MIN = -15.0;
-const float CAUSTIC_WORLD_MAX = 15.0;
-const uint CAUSTIC_GRID_SIZE = 512;  // 512x512 grid
-const float CAUSTIC_CELL_SIZE = (CAUSTIC_WORLD_MAX - CAUSTIC_WORLD_MIN) / float(CAUSTIC_GRID_SIZE);
+// 3D spatial hashing parameters - must match ray.comp exactly
+const float CAUSTIC_CELL_SIZE = 0.08;  // World units per cell (~8cm)
+const uint CAUSTIC_HASH_SIZE = 4194304;  // 4M cells for hash table
 
-// Direct 2D index from world XZ position (floor is at fixed Y)
-// Index = ix * GRID_SIZE + iz (X is major axis)
-uint causticIndex2D(vec3 pos) {
-    float u = (pos.x - CAUSTIC_WORLD_MIN) / (CAUSTIC_WORLD_MAX - CAUSTIC_WORLD_MIN);
-    float v = (pos.z - CAUSTIC_WORLD_MIN) / (CAUSTIC_WORLD_MAX - CAUSTIC_WORLD_MIN);
-    uint ix = uint(clamp(u * float(CAUSTIC_GRID_SIZE), 0.0, float(CAUSTIC_GRID_SIZE - 1)));
-    uint iz = uint(clamp(v * float(CAUSTIC_GRID_SIZE), 0.0, float(CAUSTIC_GRID_SIZE - 1)));
-    return ix * CAUSTIC_GRID_SIZE + iz;  // X major
+// Get cell coordinates for a world position
+ivec3 causticGetCell3D(vec3 pos) {
+    return ivec3(floor(pos / CAUSTIC_CELL_SIZE));
+}
+
+// Hash from cell coordinates directly
+uint cellHash3D(ivec3 cell) {
+    uint hash = uint(cell.x) * 73856093u ^
+                uint(cell.y) * 19349663u ^
+                uint(cell.z) * 83492791u;
+    return hash % CAUSTIC_HASH_SIZE;
+}
+
+// Cell signature: pack cell coords for collision validation
+// Uses 10 bits per axis (range -512 to +511 cells = ±25.6 world units)
+// High bit set to distinguish from empty (0)
+uint cellSignature(ivec3 cell) {
+    uint px = uint(cell.x + 512) & 0x3FFu;
+    uint py = uint(cell.y + 512) & 0x3FFu;
+    uint pz = uint(cell.z + 512) & 0x3FFu;
+    return (px) | (py << 10) | (pz << 20) | 0x80000000u;
 }
 
 const uint MAT_GLASS = 2;
@@ -432,79 +445,152 @@ bool hitTorus(vec3 ro, vec3 rd, vec3 center, float majorR, float minorR,
 }
 
 // ============================================================================
-// Bezier Instance AABB hit (for glass teapots, etc.)
-// Uses BVH root bounds as local-space AABB, transforms ray appropriately
+// Bezier Instance SDF - Control point metaball approximation
+// Creates a "blobby" surface around control points for sphere tracing
 // ============================================================================
-bool hitInstanceAABB(uint instIdx, vec3 ro, vec3 rd,
-                     out float tNear, out float tFar,
-                     out vec3 normalNear, out vec3 normalFar,
-                     out vec3 worldEntry, out vec3 worldExit) {
-    if (pc.numBVHNodes == 0) return false;
+
+// Blob radius computed from BVH bounds - cached per frame
+float g_blobRadius = 0.0;
+
+// SDF using control points as metaballs (local space)
+// Control point offset from surface creates smooth envelope that captures curves
+// Returns signed distance: negative inside, positive outside
+float patchCloudSDF(vec3 p) {
+    float minDist = 1e20;
+
+    // Sample all 16 control points per patch
+    // Control points form a "cage" that smoothly envelops the surface
+    for (uint i = 0; i < pc.numPatches; i++) {
+        uint base = i * 16;
+        // All 16 control points
+        for (int j = 0; j < 16; j++) {
+            minDist = min(minDist, length(p - patchData[base + j].xyz));
+        }
+    }
+
+    return minDist - g_blobRadius;
+}
+
+// Compute SDF gradient for normal calculation
+vec3 patchCloudGradient(vec3 p) {
+    const float eps = 0.001;
+    return normalize(vec3(
+        patchCloudSDF(p + vec3(eps, 0, 0)) - patchCloudSDF(p - vec3(eps, 0, 0)),
+        patchCloudSDF(p + vec3(0, eps, 0)) - patchCloudSDF(p - vec3(0, eps, 0)),
+        patchCloudSDF(p + vec3(0, 0, eps)) - patchCloudSDF(p - vec3(0, 0, eps))
+    ));
+}
+
+// ============================================================================
+// Bezier Instance SDF hit - Bidirectional sphere tracing
+// Uses control point cloud for teapot-like caustic shapes
+// ============================================================================
+bool hitInstanceSDF(uint instIdx, vec3 ro, vec3 rd,
+                    out float tNear, out float tFar,
+                    out vec3 normalNear, out vec3 normalFar,
+                    out vec3 worldEntry, out vec3 worldExit) {
+    if (pc.numBVHNodes == 0 || pc.numPatches == 0) return false;
 
     BezierInstance inst = instances[instIdx];
 
     // Transform ray to local space
     vec3 localOrigin = rotateXYZInverse(ro - inst.position, inst.rotation) / inst.scale;
-    vec3 localDir = rotateXYZInverse(rd, inst.rotation);
+    vec3 localDir = normalize(rotateXYZInverse(rd, inst.rotation));
 
-    // Get bounds from BVH root node (local space)
+    // Get bounds from BVH root node (local space) for bounding sphere
     vec3 aabbMin = vec3(bvhNodes[0].minX, bvhNodes[0].minY, bvhNodes[0].minZ);
     vec3 aabbMax = vec3(bvhNodes[0].maxX, bvhNodes[0].maxY, bvhNodes[0].maxZ);
+    vec3 aabbCenter = (aabbMin + aabbMax) * 0.5;
+    float boundRadius = length(aabbMax - aabbMin) * 0.6;  // Bounding sphere
 
-    // Pad slightly to ensure we enclose the surface
-    vec3 pad = (aabbMax - aabbMin) * 0.02;
-    aabbMin -= pad;
-    aabbMax += pad;
+    // Compute blob radius from bounds (control point spacing)
+    // Larger radius = fuller coverage, smaller = tighter/sharper fit
+    g_blobRadius = length(aabbMax - aabbMin) * 0.12;  // ~12% of diagonal
 
-    // Box intersection in local space
-    vec3 center = (aabbMin + aabbMax) * 0.5;
-    vec3 half_ = (aabbMax - aabbMin) * 0.5;
+    // Bounding sphere check
+    vec3 oc = localOrigin - aabbCenter;
+    float b = dot(oc, localDir);
+    float c = dot(oc, oc) - boundRadius * boundRadius;
+    float disc = b * b - c;
+    if (disc < 0.0) return false;
 
-    vec3 safeDir = localDir;
-    float minComp = 1e-6;
-    if (abs(safeDir.x) < minComp) safeDir.x = sign(safeDir.x + minComp) * minComp;
-    if (abs(safeDir.y) < minComp) safeDir.y = sign(safeDir.y + minComp) * minComp;
-    if (abs(safeDir.z) < minComp) safeDir.z = sign(safeDir.z + minComp) * minComp;
+    float sqrtDisc = sqrt(disc);
+    float t0 = -b - sqrtDisc;
+    float t1 = -b + sqrtDisc;
+    if (t1 < 0.001) return false;
 
-    vec3 invDir = 1.0 / safeDir;
-    vec3 t1 = (aabbMin - localOrigin) * invDir;
-    vec3 t2 = (aabbMax - localOrigin) * invDir;
-    vec3 tMin = min(t1, t2);
-    vec3 tMax = max(t1, t2);
-    tNear = max(max(tMin.x, tMin.y), tMin.z);
-    tFar = min(min(tMax.x, tMax.y), tMax.z);
+    float tStart = max(t0, 0.001);
+    float tEnd = t1;
 
-    if (tNear > tFar || tFar < 0.0) return false;
+    // Forward sphere trace to find entry
+    tNear = -1.0;
+    float t = tStart;
+    for (int i = 0; i < 64; i++) {
+        vec3 p = localOrigin + t * localDir;
+        float d = patchCloudSDF(p);
+        if (d < 0.0005) {
+            tNear = t;
+            break;
+        }
+        t += max(d, 0.005);  // Min step to avoid getting stuck
+        if (t > tEnd) break;
+    }
+    if (tNear < 0.0) return false;
 
-    // Local hit points
-    vec3 pNear = localOrigin + tNear * safeDir;
-    vec3 pFar = localOrigin + tFar * safeDir;
-
-    // Entry normal (local space)
-    vec3 localNear = pNear - center;
-    vec3 scaledNear = abs(localNear) / half_;
-    if (scaledNear.x >= scaledNear.y && scaledNear.x >= scaledNear.z) {
-        normalNear = vec3(sign(localNear.x), 0, 0);
-    } else if (scaledNear.y >= scaledNear.z) {
-        normalNear = vec3(0, sign(localNear.y), 0);
-    } else {
-        normalNear = vec3(0, 0, sign(localNear.z));
+    // Backward sphere trace to find exit
+    tFar = -1.0;
+    t = tEnd;
+    for (int i = 0; i < 64; i++) {
+        vec3 p = localOrigin + t * localDir;
+        float d = patchCloudSDF(p);
+        if (d < 0.0005) {
+            tFar = t;
+            break;
+        }
+        t -= max(d, 0.005);
+        if (t <= tNear + 0.001) break;
     }
 
-    // Exit normal (local space)
-    vec3 localFar = pFar - center;
-    vec3 scaledFar = abs(localFar) / half_;
-    if (scaledFar.x >= scaledFar.y && scaledFar.x >= scaledFar.z) {
-        normalFar = vec3(sign(localFar.x), 0, 0);
-    } else if (scaledFar.y >= scaledFar.z) {
-        normalFar = vec3(0, sign(localFar.y), 0);
-    } else {
-        normalFar = vec3(0, 0, sign(localFar.z));
+    // Fallback: march forward from entry to find exit
+    if (tFar < 0.0 || tFar <= tNear) {
+        t = tNear + 0.01;
+        bool wasInside = true;
+        for (int i = 0; i < 128; i++) {
+            vec3 p = localOrigin + t * localDir;
+            float d = patchCloudSDF(p);
+            if (d > 0.01) {  // Crossed to outside
+                // Binary search for exact crossing
+                float lo = tNear, hi = t;
+                for (int j = 0; j < 12; j++) {
+                    float mid = (lo + hi) * 0.5;
+                    if (patchCloudSDF(localOrigin + mid * localDir) < 0.0) {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                tFar = (lo + hi) * 0.5;
+                break;
+            }
+            t += 0.02;
+            if (t > tEnd) {
+                tFar = tEnd;  // Use bound as fallback
+                break;
+            }
+        }
     }
+
+    if (tFar <= tNear) return false;
+
+    // Compute normals from SDF gradient (local space)
+    vec3 pNear = localOrigin + tNear * localDir;
+    vec3 pFar = localOrigin + tFar * localDir;
+    vec3 localNormalNear = patchCloudGradient(pNear);
+    vec3 localNormalFar = patchCloudGradient(pFar);
 
     // Transform normals back to world space
-    normalNear = normalize(rotateXYZ(normalNear, inst.rotation));
-    normalFar = normalize(rotateXYZ(normalFar, inst.rotation));
+    normalNear = normalize(rotateXYZ(localNormalNear, inst.rotation));
+    normalFar = normalize(rotateXYZ(localNormalFar, inst.rotation));
 
     // Transform hit points to world space
     worldEntry = rotateXYZ(pNear * inst.scale, inst.rotation) + inst.position;
@@ -517,23 +603,96 @@ bool hitInstanceAABB(uint instIdx, vec3 ro, vec3 rd,
     return true;
 }
 
-// Trace ray through glass, return floor hit position (vec3(-1000) if no hit)
-// Also returns: primitive index, path length through glass, material ID
+// Trace ray against opaque (non-dielectric) geometry
+// Returns hit position or vec3(-1000) sentinel if no hit
+vec3 traceToOpaqueGeometry(vec3 ro, vec3 rd, float maxDist) {
+    float bestT = maxDist;
+
+    for (uint i = 0; i < pc.numPrimitives; i++) {
+        uint primMatId = primMaterialIds[i];
+        if (primMatId >= pc.numMaterials) continue;
+        // Skip refractive materials (IOR > 1.0) - we want opaque surfaces only
+        if (materials[primMatId].ior > 1.001) continue;
+
+        CSGPrimitive prim = primitives[i];
+        CSGTransform xform = transforms[i];
+        vec3 center = vec3(prim.x, prim.y, prim.z);
+        float scale = xform.scale;
+
+        float t = -1.0;
+        if (prim.type == PRIM_SPHERE) {
+            t = hitSphere(ro, rd, center, prim.param0 * scale);
+        } else if (prim.type == PRIM_BOX) {
+            vec3 half_ = vec3(prim.param0, prim.param1, prim.param2) * scale;
+            float tNear, tFar;
+            vec3 nNear, nFar;
+            if (hitBox(ro, rd, center, half_, tNear, tFar, nNear, nFar)) {
+                t = tNear;
+            }
+        } else if (prim.type == PRIM_CYLINDER) {
+            float tNear, tFar;
+            vec3 nNear, nFar;
+            if (hitCylinder(ro, rd, center, prim.param0 * scale, prim.param1 * scale, tNear, tFar, nNear, nFar)) {
+                t = tNear;
+            }
+        } else if (prim.type == PRIM_CONE) {
+            float tNear, tFar;
+            vec3 nNear, nFar;
+            if (hitCone(ro, rd, center, prim.param0 * scale, prim.param1 * scale, tNear, tFar, nNear, nFar)) {
+                t = tNear;
+            }
+        } else if (prim.type == PRIM_TORUS) {
+            float tNear, tFar;
+            vec3 nNear, nFar;
+            if (hitTorus(ro, rd, center, prim.param0 * scale, prim.param1 * scale, tNear, tFar, nNear, nFar)) {
+                t = tNear;
+            }
+        }
+
+        if (t > 0.001 && t < bestT) {
+            bestT = t;
+        }
+    }
+
+    // Also check floor if enabled
+    if (pc.floorY > -1000.0 && abs(rd.y) > 0.001) {
+        float tFloor = (pc.floorY - ro.y) / rd.y;
+        if (tFloor > 0.001 && tFloor < bestT) {
+            bestT = tFloor;
+        }
+    }
+
+    if (bestT >= maxDist) {
+        return vec3(-1000.0);  // No hit
+    }
+
+    return ro + rd * bestT;
+}
+
+// Trace ray through dielectric, return surface hit position (vec3(-1000) if no hit)
+// Also returns: primitive index, path length through dielectric, material ID
 vec3 tracePhoton(vec3 ro, vec3 rd, out int hitPrimitive, out float pathLength, out uint matId) {
     hitPrimitive = -1;
     pathLength = 0.0;
     matId = 0;
 
-    // Find closest glass object (CSG primitive or Bezier instance)
+    // DEBUG: Check if we have primitives at all
+    if (pc.numPrimitives == 0) {
+        return vec3(-1000.0);
+    }
+
+    // Find closest dielectric object (CSG primitive or Bezier instance)
     float bestT = 1e10;
     int bestPrim = -1;
     int bestInstance = -1;  // -1 = CSG primitive, >= 0 = Bezier instance index
 
-    // Check CSG primitives
+    // Check CSG primitives for dielectrics (IOR > 1.0)
     for (uint i = 0; i < pc.numPrimitives; i++) {
         uint primMatId = primMaterialIds[i];
         if (primMatId >= pc.numMaterials) continue;
-        if (materials[primMatId].type != MAT_GLASS) continue;
+        // Dielectrics have real IOR > 1.0 (default is 1.0 = no refraction)
+        float ior = materials[primMatId].ior;
+        if (ior <= 1.001) continue;
 
         CSGPrimitive prim = primitives[i];
         CSGTransform xform = transforms[i];
@@ -577,15 +736,16 @@ vec3 tracePhoton(vec3 ro, vec3 rd, out int hitPrimitive, out float pathLength, o
         }
     }
 
-    // Check Bezier instances (glass teapots, etc.)
+    // Check Bezier instances (dielectric teapots, etc.)
     for (uint i = 0; i < pc.numInstances; i++) {
         BezierInstance inst = instances[i];
         if (inst.materialId >= pc.numMaterials) continue;
-        if (materials[inst.materialId].type != MAT_GLASS) continue;
+        // Dielectrics have real IOR > 1.0
+        if (materials[inst.materialId].ior <= 1.001) continue;
 
         float tNear, tFar;
         vec3 nNear, nFar, wEntry, wExit;
-        if (hitInstanceAABB(i, ro, rd, tNear, tFar, nNear, nFar, wEntry, wExit)) {
+        if (hitInstanceSDF(i, ro, rd, tNear, tFar, nNear, nFar, wEntry, wExit)) {
             if (tNear > 0.0 && tNear < bestT) {
                 bestT = tNear;
                 bestPrim = int(i);
@@ -605,18 +765,18 @@ vec3 tracePhoton(vec3 ro, vec3 rd, out int hitPrimitive, out float pathLength, o
         matId = primMaterialIds[bestPrim];
     }
 
-    // Trace through glass
+    // Trace through dielectric
     float ior = materials[matId].ior > 1.0 ? materials[matId].ior : 1.5;
 
     vec3 hitEntry, hitExit;
     vec3 normalEntry, normalExit;
     vec3 refracted;
 
-    // Handle Bezier instance (glass teapot, etc.) using AABB approximation
+    // Handle Bezier instance (dielectric teapot, etc.) using SDF sphere tracing
     if (bestInstance >= 0) {
         float tNear, tFar;
         vec3 nNear, nFar, wEntry, wExit;
-        hitInstanceAABB(uint(bestInstance), ro, rd, tNear, tFar, nNear, nFar, wEntry, wExit);
+        hitInstanceSDF(uint(bestInstance), ro, rd, tNear, tFar, nNear, nFar, wEntry, wExit);
 
         hitEntry = wEntry;
         normalEntry = nNear;
@@ -624,11 +784,10 @@ vec3 tracePhoton(vec3 ro, vec3 rd, out int hitPrimitive, out float pathLength, o
         refracted = refractRay(rd, normalEntry, 1.0 / ior);
         if (length(refracted) < 0.5) return vec3(-1000.0);
 
-        // For AABB approximation, use direct path through box
-        // Re-trace with refracted ray to find exit
+        // Re-trace with refracted ray to find exit point
         float tN2, tF2;
         vec3 nN2, nF2, wE2, wX2;
-        if (!hitInstanceAABB(uint(bestInstance), hitEntry + refracted * 0.01, refracted,
+        if (!hitInstanceSDF(uint(bestInstance), hitEntry + refracted * 0.01, refracted,
                              tN2, tF2, nN2, nF2, wE2, wX2)) {
             // Fallback: use original exit point
             hitExit = wExit;
@@ -756,7 +915,7 @@ vec3 tracePhoton(vec3 ro, vec3 rd, out int hitPrimitive, out float pathLength, o
         }
     }  // End of CSG primitive handling
 
-    // Calculate path length through glass for Beer's law
+    // Calculate path length through dielectric for Beer's law
     pathLength = length(hitExit - hitEntry);
 
     // Refract out
@@ -764,15 +923,24 @@ vec3 tracePhoton(vec3 ro, vec3 rd, out int hitPrimitive, out float pathLength, o
     if (length(exitDir) < 0.5) return vec3(-1000.0);
     exitDir = normalize(exitDir);
 
-    // Hit floor
-    if (abs(exitDir.y) < 0.001) return vec3(-1000.0);
-    float tFloor = (pc.floorY - hitExit.y) / exitDir.y;
-    if (tFloor < 0.0 || tFloor > 100.0) return vec3(-1000.0);
+    // Trace to opaque geometry (any non-dielectric surface)
+    vec3 geoHit = traceToOpaqueGeometry(hitExit + exitDir * 0.01, exitDir, 100.0);
 
-    return hitExit + exitDir * tFloor;
+    // DEBUG: If geometry trace fails, try simple y=0 plane to verify photons work
+    if (geoHit.x < -100.0 && exitDir.y < -0.001) {
+        float tPlane = -hitExit.y / exitDir.y;
+        if (tPlane > 0.0 && tPlane < 100.0) {
+            geoHit = hitExit + exitDir * tPlane;
+        }
+    }
+
+    // Fallback: use dielectric exit point projected to y=0
+    if (geoHit.x < -100.0) {
+        geoHit = vec3(hitExit.x, 0.0, hitExit.z);
+    }
+
+    return geoHit;
 }
-
-// (CAUSTIC_WORLD_MIN/MAX defined at top of file)
 
 void main() {
     ivec2 rayIdx = ivec2(gl_GlobalInvocationID.xy);
@@ -794,17 +962,18 @@ void main() {
     float raySpacing;
 
     if (pc.lightType == LIGHT_DIRECTIONAL) {
-        // Directional: parallel rays covering world XZ bounds
-        // Offset ray origins to account for light angle hitting objects at different heights
-        float extent = 20.0;  // Cover ±20 world units
+        // Directional: parallel rays covering area around camera
+        float extent = 50.0;  // Cover ±50 world units around camera
         raySpacing = extent * 2.0 / float(pc.gridWidth);
 
-        // Start high and offset in opposite direction of light travel
-        // so rays passing through objects land on the floor within bounds
-        float startY = 100.0;
-        vec3 offset = -lightDir * 80.0;  // Move origin back along light direction
-        ro = vec3(u * extent, 0.0, v * extent) + offset;
-        ro.y = startY;
+        // Build ray grid perpendicular to light direction, centered on camera XZ
+        // This focuses caustic computation where the camera is looking
+        vec3 camPos = vec3(pc.camPosX, pc.camPosY, pc.camPosZ);
+        vec3 gridCenter = vec3(camPos.x, 0.0, camPos.z);  // Project camera to Y=0 plane
+        float startDist = 200.0;  // Start far back along light direction
+
+        // Grid is in the plane perpendicular to lightDir
+        ro = gridCenter - lightDir * startDist + right * u * extent + forward * v * extent;
         rd = lightDir;
     } else if (pc.lightType == LIGHT_POINT) {
         // Point light: rays emanate from point in hemisphere toward floor
@@ -820,36 +989,15 @@ void main() {
         raySpacing = angle * 2.0 / float(pc.gridWidth);
     }
 
-    // DEBUG: Test ray coverage by computing direct floor hit (bypass glass tracing)
-    // Remove this debug block after testing
-    #if 0
-    {
-        // Direct floor hit without glass
-        float tFloor = (pc.floorY - ro.y) / rd.y;
-        if (tFloor > 0.0) {
-            vec3 floorHit = ro + rd * tFloor;
-            if (floorHit.x >= CAUSTIC_WORLD_MIN && floorHit.x <= CAUSTIC_WORLD_MAX &&
-                floorHit.z >= CAUSTIC_WORLD_MIN && floorHit.z <= CAUSTIC_WORLD_MAX) {
-                uint debugIdx = causticIndex2D(floorHit);
-                atomicAdd(causticCells[debugIdx], 100);
-            }
-        }
-        return;  // Skip glass tracing for debug
-    }
-    #endif
-
     // Trace center ray (returns vec3(-1000) for no hit)
     int primCenter, primRight, primUp;
     float pathCenter, pathRight, pathUp;
     uint matCenter, matRight, matUp;
     vec3 hitCenter = tracePhoton(ro, rd, primCenter, pathCenter, matCenter);
+
     if (hitCenter.x < -100.0) return;  // Check for sentinel, not negative coords
 
-    // Check if hit is within our map bounds (fixed bounds matching ray.comp)
-    if (hitCenter.x < CAUSTIC_WORLD_MIN || hitCenter.x > CAUSTIC_WORLD_MAX ||
-        hitCenter.z < CAUSTIC_WORLD_MIN || hitCenter.z > CAUSTIC_WORLD_MAX) {
-        return;
-    }
+    // 3D spatial hash handles any position - no bounds check needed
 
     // Compute area ratio using neighboring rays
     // For directional light with XZ grid, neighbors are simply +X and +Z
@@ -868,9 +1016,9 @@ void main() {
     vec3 hitRight = tracePhoton(roRight, rdRight, primRight, pathRight, matRight);
     vec3 hitUp = tracePhoton(roUp, rdUp, primUp, pathUp, matUp);
 
-    // Require all 3 rays to trace through glass (can be different primitives)
+    // Require all 3 rays to trace through dielectric (can be different primitives)
     if (hitRight.x < -100.0 || hitUp.x < -100.0) {
-        return;  // Neighbor missed glass entirely
+        return;  // Neighbor missed dielectric entirely
     }
 
     // Check floor position continuity - reject if neighbors land too far apart
@@ -904,15 +1052,15 @@ void main() {
         intensity /= (1.0 + dist * dist * 0.01);
     }
 
-    // Apply Beer's law for colored glass absorption
+    // Apply Beer's law for colored dielectric absorption
     // absorption = -log(color) gives us absorption coefficient from transmission color
     // transmitted = exp(-absorption * distance)
     Material mat = materials[matCenter];
-    vec3 glassColor = vec3(mat.r, mat.g, mat.b);
+    vec3 tintColor = vec3(mat.r, mat.g, mat.b);
 
     // Convert color to absorption (avoid log(0) with small epsilon)
     // Higher color value = less absorption = more transmission
-    vec3 absorption = -log(max(glassColor, vec3(0.01)));
+    vec3 absorption = -log(max(tintColor, vec3(0.01)));
 
     // Apply Beer's law: transmission decreases exponentially with path length
     // Scale path length for reasonable absorption (typical sphere diameter ~2)
@@ -925,9 +1073,21 @@ void main() {
 
     if (fixedRGB.r == 0u && fixedRGB.g == 0u && fixedRGB.b == 0u) return;
 
-    // Atomic accumulate RGB to 2D grid cell (3 uints per cell)
-    uint cellIndex = causticIndex2D(hitCenter);
-    atomicAdd(causticCells[cellIndex * 3u + 0u], fixedRGB.r);
-    atomicAdd(causticCells[cellIndex * 3u + 1u], fixedRGB.g);
-    atomicAdd(causticCells[cellIndex * 3u + 2u], fixedRGB.b);
+    // Atomic accumulate RGB to 3D spatial hash with collision validation
+    // Buffer layout: 4 uints per cell [signature, R, G, B]
+    ivec3 cell = causticGetCell3D(hitCenter);
+    uint hash = cellHash3D(cell);
+    uint sig = cellSignature(cell);
+
+    // Try to claim this bucket with our cell signature
+    // atomicCompSwap returns old value: 0 means we claimed it, sig means same cell owns it
+    uint oldSig = atomicCompSwap(causticCells[hash * 4u + 0u], 0u, sig);
+
+    if (oldSig == 0u || oldSig == sig) {
+        // Bucket is ours (first claim) or same cell already owns it - add RGB
+        atomicAdd(causticCells[hash * 4u + 1u], fixedRGB.r);
+        atomicAdd(causticCells[hash * 4u + 2u], fixedRGB.g);
+        atomicAdd(causticCells[hash * 4u + 3u], fixedRGB.b);
+    }
+    // else: collision with different cell, skip this photon (prevents disco floor)
 }

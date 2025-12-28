@@ -1,7 +1,7 @@
 ; Caustics Shape Test - Test cylinder, cone, torus caustics
 ; All shapes use glass material to verify caustic support
 
-(material glass (type glass) (rgb 0.98 0.98 1.0) (ior 1.0))
+(material glass (type glass) (rgb 0.98 0.98 1.0) (ior 1.5))
 (material rough-glass (type glass) (rgb 0.98 0.98 1.0) (ior 1.5))
 (material red-glass (type glass) (rgb 1.0 0.3 0.3) (ior 1.5))
 (material green-glass (type glass) (rgb 0.3 1.0 0.3) (ior 1.5))
@@ -20,22 +20,22 @@
 ; ============================================================================
 
 ; Sphere (baseline - known working)
-;(shape (sphere (at -4 1.0 0) (r 1.0)) glass)
+(shape (sphere (at -4 1.0 0) (r 1.0)) glass)
 
 ; Box (slightly rotated to avoid axis-aligned artifacts)
 (shape (box (at -1.5 1.75 0) (half 0.75 0.75 0.75) (rotate 0 1 0 )) glass)
 
 ; Cylinder (new)
-;(shape (cylinder (at 1.5 0 0) (r 0.6) (h 2.0)) red-glass)
+(shape (cylinder (at 1.5 0 0) (r 0.6) (h 2.0)) red-glass)
 
 ; Cone (new)
-;(shape (cone (at 4.5 0 0) (r 0.8) (h 2.0)) green-glass)
+(shape (cone (at 4.5 0 0) (r 0.8) (h 2.0)) green-glass)
 
 ; Torus (new) - lying flat
-;(shape (torus (at 0 1.0 -4) (R 1.0) (r 0.3)) blue-glass)
+(shape (torus (at 0 1.0 -4) (R 1.0) (r 0.3)) blue-glass)
 
 ; Torus (new) - standing up
-;(shape (torus (at 3 1.0 -4) (R 0.8) (r 0.25) (rotate 90 0 0)) glass)
+(shape (torus (at 3 1.0 -4) (R 0.8) (r 0.25) (rotate 90 0 0)) glass)
 
 ; Reference diffuse sphere
-;(shape (sphere (at -4 0.3 -4) (r 0.3)) white)
+(shape (sphere (at -4 0.3 -4) (r 0.3)) white)

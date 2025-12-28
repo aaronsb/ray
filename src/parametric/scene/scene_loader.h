@@ -473,7 +473,8 @@ private:
         }
 
         std::string name = expr[1].asSymbol();
-        Material mat = {0.8f, 0.8f, 0.8f, 0, 0.5f, 0.0f, 1.5f, 0.0f}; // defaults
+        // Default IOR=1.0 means no refraction; only glass/dielectric sets real IOR
+        Material mat = {0.8f, 0.8f, 0.8f, 0, 0.5f, 0.0f, 1.0f, 0.0f};
 
         for (size_t i = 2; i < expr.size(); i++) {
             const auto& prop = expr[i];
