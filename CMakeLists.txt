@@ -31,6 +31,7 @@ file(MAKE_DIRECTORY ${SHADER_BINARY_DIR})
 
 set(SHADERS
     ray.comp
+    caustics.comp
 )
 
 foreach(SHADER ${SHADERS})

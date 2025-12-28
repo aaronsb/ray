@@ -22,6 +22,7 @@ layout(local_size_x = 16, local_size_y = 16) in;
 #define FEATURE_POINT_LIGHTS    1   // Point light sources with distance falloff
 #define FEATURE_FIREFLY_CLAMP   1   // Clamp bright outliers in early frames
 #define FEATURE_GAUSSIAN_GI     1   // Gaussian-based GI (replaces stochastic path tracing for diffuse)
+#define FEATURE_CAUSTIC_MAP     1   // Area-ratio caustic map (light through glass)
 
 #ifndef MAX_BOUNCES
 #define MAX_BOUNCES             4   // Max ray depth (2-4 typical for interactive, higher for quality)
@@ -223,6 +224,108 @@ struct CSGTransform {
 layout(std430, set = 0, binding = 14) readonly buffer CSGTransformBuffer {
     CSGTransform csgTransforms[];
 };
+
+#if FEATURE_CAUSTIC_MAP
+// Caustic hash buffer from spatial hashing with atomics
+// Fixed world coverage: -15 to +15 in X and Z
+layout(std430, set = 0, binding = 15) readonly buffer CausticHash {
+    uint causticCells[];
+};
+
+// 2D grid parameters - must match caustics.comp exactly
+const float CAUSTIC_WORLD_MIN = -15.0;
+const float CAUSTIC_WORLD_MAX = 15.0;
+const uint CAUSTIC_GRID_SIZE = 512;  // 512x512 grid
+const float CAUSTIC_CELL_SIZE = (CAUSTIC_WORLD_MAX - CAUSTIC_WORLD_MIN) / float(CAUSTIC_GRID_SIZE);
+
+// Get 2D cell coordinates for a world position
+ivec2 causticGetCell2D(vec3 pos) {
+    float u = (pos.x - CAUSTIC_WORLD_MIN) / (CAUSTIC_WORLD_MAX - CAUSTIC_WORLD_MIN);
+    float v = (pos.z - CAUSTIC_WORLD_MIN) / (CAUSTIC_WORLD_MAX - CAUSTIC_WORLD_MIN);
+    int ix = int(clamp(u * float(CAUSTIC_GRID_SIZE), 0.0, float(CAUSTIC_GRID_SIZE - 1)));
+    int iz = int(clamp(v * float(CAUSTIC_GRID_SIZE), 0.0, float(CAUSTIC_GRID_SIZE - 1)));
+    return ivec2(ix, iz);
+}
+
+// Direct 2D index from cell coordinates
+// Index = ix * GRID_SIZE + iz (X is major axis, matches caustics.comp)
+uint causticCellIndex(ivec2 cell) {
+    cell = clamp(cell, ivec2(0), ivec2(int(CAUSTIC_GRID_SIZE) - 1));
+    return uint(cell.x) * CAUSTIC_GRID_SIZE + uint(cell.y);  // X major
+}
+
+// Gaussian kernel for smooth falloff
+float causticGaussian(float distSq, float sigma) {
+    return exp(-distSq / (2.0 * sigma * sigma));
+}
+
+// Sample caustic contribution using stochastic Gaussian-weighted gathering
+// jitterXZ: random jitter in [-0.5, 0.5] range for temporal smoothing
+vec3 sampleCausticMap(vec3 hitPoint, vec2 jitterXZ) {
+    // Check if point is within caustic map coverage
+    if (hitPoint.x < CAUSTIC_WORLD_MIN || hitPoint.x > CAUSTIC_WORLD_MAX ||
+        hitPoint.z < CAUSTIC_WORLD_MIN || hitPoint.z > CAUSTIC_WORLD_MAX) {
+        return vec3(0.0);
+    }
+
+    // Gaussian kernel radius (sigma ~2 cells for smooth falloff)
+    const float KERNEL_SIGMA = 2.0 * CAUSTIC_CELL_SIZE;
+    const int SEARCH_RADIUS = 3;  // Search 7x7 for wider kernel
+
+    // Apply stochastic jitter within cell for temporal smoothing
+    vec3 jitteredPoint = hitPoint + vec3(
+        jitterXZ.x * CAUSTIC_CELL_SIZE,
+        0.0,
+        jitterXZ.y * CAUSTIC_CELL_SIZE
+    );
+
+    ivec2 centerCell = causticGetCell2D(jitteredPoint);
+    float totalIntensity = 0.0;
+    float totalWeight = 0.0;
+
+    // Search neighboring cells with Gaussian weighting (2D grid)
+    for (int dx = -SEARCH_RADIUS; dx <= SEARCH_RADIUS; dx++) {
+        for (int dz = -SEARCH_RADIUS; dz <= SEARCH_RADIUS; dz++) {
+            ivec2 neighborCell = centerCell + ivec2(dx, dz);
+
+            // Skip cells outside valid range
+            if (neighborCell.x < 0 || neighborCell.x >= int(CAUSTIC_GRID_SIZE) ||
+                neighborCell.y < 0 || neighborCell.y >= int(CAUSTIC_GRID_SIZE)) {
+                continue;
+            }
+
+            uint cellIndex = causticCellIndex(neighborCell);
+            uint fixedPoint = causticCells[cellIndex];
+
+            if (fixedPoint > 0) {
+                // World-space distance from sample point to cell center
+                vec2 cellCenter = vec2(CAUSTIC_WORLD_MIN) +
+                                  (vec2(neighborCell) + 0.5) * CAUSTIC_CELL_SIZE;
+                float distSq = dot(hitPoint.xz - cellCenter, hitPoint.xz - cellCenter);
+
+                // Gaussian weight based on actual distance
+                float weight = causticGaussian(distSq, KERNEL_SIGMA);
+
+                // Convert from accumulated fixed point (stored as intensity * 1000)
+                float intensity = float(fixedPoint) / 10000.0;
+                totalIntensity += intensity * weight;
+                totalWeight += weight;
+            }
+        }
+    }
+
+    if (totalWeight < 0.001) {
+        return vec3(0.0);
+    }
+
+    // Normalize and scale for visual appearance
+    float causticIntensity = totalIntensity / totalWeight;
+    causticIntensity *= 2.0;  // Boost brightness for visibility
+
+    // White caustics (light concentrated by glass)
+    return vec3(causticIntensity);
+}
+#endif
 
 #if FEATURE_GAUSSIAN_GI
 // Query Gaussian field for indirect illumination
@@ -1040,9 +1143,15 @@ void main() {
 #if FEATURE_POINT_LIGHTS
             extraLight += evaluatePointLights(hitPoint, normal, floorColor);
 #endif
-#if FEATURE_GAUSSIAN_GI
-            // Gaussian GI includes caustics from glass objects
+#if FEATURE_GAUSSIAN_GI && !FEATURE_CAUSTIC_MAP
+            // Gaussian GI for indirect illumination (disabled when using caustic map)
             extraLight += queryGaussianGI(hitPoint, normal, floorColor);
+#endif
+#if FEATURE_CAUSTIC_MAP
+            // Caustics from light refracted through glass (stochastic Gaussian gathering)
+            vec2 causticJitter = vec2(rand() - 0.5, rand() - 0.5);
+            vec3 caustic = sampleCausticMap(hitPoint, causticJitter);
+            extraLight += caustic * floorColor;
 #endif
             color += throughput * (ambient + diffuse + extraLight);
             terminated = true;

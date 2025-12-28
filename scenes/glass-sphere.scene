@@ -1,0 +1,50 @@
+; Colored Glass Caustics - Radial arrangement with overhead sun
+; 8 colored glass spheres arranged in a circle
+
+; ============================================================================
+; Materials - Colored glass across the hue spectrum
+; ============================================================================
+(material glass-red     (type glass) (rgb 1.0 0.2 0.2) (ior 1.5))
+(material glass-orange  (type glass) (rgb 1.0 0.6 0.2) (ior 1.5))
+(material glass-yellow  (type glass) (rgb 1.0 1.0 0.3) (ior 1.5))
+(material glass-green   (type glass) (rgb 0.3 1.0 0.3) (ior 1.5))
+(material glass-cyan    (type glass) (rgb 0.3 1.0 1.0) (ior 1.5))
+(material glass-blue    (type glass) (rgb 0.3 0.4 1.0) (ior 1.5))
+(material glass-purple  (type glass) (rgb 0.7 0.3 1.0) (ior 1.5))
+(material glass-magenta (type glass) (rgb 1.0 0.3 0.8) (ior 1.5))
+
+; Sun directly overhead for symmetric caustics
+(sun (azimuth 0) (elevation 88) (intensity 1.2) (color 1.0 1.0 1.0) (ambient 0.05))
+
+; Checker floor
+(material gray-floor (type diffuse) (rgb 0.25 0.25 0.25))
+(floor (y 0) gray-floor)
+
+; ============================================================================
+; 8 Glass spheres in radial pattern
+; Radius of circle = 4, sphere radius = 1.0, height = 2.0
+; ============================================================================
+
+; 0 degrees - Red (front)
+(shape (sphere (at 4.0 2.0 0.0) (r 1.0)) glass-red)
+
+; 45 degrees - Orange
+(shape (sphere (at 2.83 2.0 2.83) (r 1.0)) glass-orange)
+
+; 90 degrees - Yellow (right)
+(shape (sphere (at 0.0 2.0 4.0) (r 1.0)) glass-yellow)
+
+; 135 degrees - Green
+(shape (sphere (at -2.83 2.0 2.83) (r 1.0)) glass-green)
+
+; 180 degrees - Cyan (back)
+(shape (sphere (at -4.0 2.0 0.0) (r 1.0)) glass-cyan)
+
+; 225 degrees - Blue
+(shape (sphere (at -2.83 2.0 -2.83) (r 1.0)) glass-blue)
+
+; 270 degrees - Purple (left)
+(shape (sphere (at 0.0 2.0 -4.0) (r 1.0)) glass-purple)
+
+; 315 degrees - Magenta
+(shape (sphere (at 2.83 2.0 -2.83) (r 1.0)) glass-magenta)

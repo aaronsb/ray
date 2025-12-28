@@ -242,6 +242,20 @@ private:
     VkBuffer m_gaussianBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_gaussianBufferMemory = VK_NULL_HANDLE;
 
+    // GPU Caustics - area-ratio method with caustic map texture
+    VkPipeline m_causticsPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout m_causticsPipelineLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_causticsDescriptorSetLayout = VK_NULL_HANDLE;
+    VkDescriptorPool m_causticsDescriptorPool = VK_NULL_HANDLE;
+    VkDescriptorSet m_causticsDescriptorSet = VK_NULL_HANDLE;
+    VkBuffer m_causticsPrimMaterialBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_causticsPrimMaterialBufferMemory = VK_NULL_HANDLE;
+    // Caustic hash buffer (spatial hashing with atomics)
+    VkBuffer m_causticHashBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_causticHashBufferMemory = VK_NULL_HANDLE;
+    static constexpr uint32_t CAUSTIC_HASH_SIZE = 262144;  // Must match shader
+    bool m_causticsNeedUpdate = true;
+
     // Frame tracking
     uint32_t m_frameIndex = 0;
     uint32_t m_qualityLevel = 2;  // 0=Draft, 1=Preview, 2=Final (default)
@@ -262,6 +276,8 @@ private:
     void createGaussianBuffer();
     void createDescriptorSet();
     void createComputePipeline();
+    void createCausticsPipeline();
+    void runCausticsPass();
     void recordComputeCommands(VkCommandBuffer cmdBuf);
 
     uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties);

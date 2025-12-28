@@ -1,0 +1,362 @@
+#version 450
+
+// Caustic Photon Mapping with Spatial Hashing
+// Traces photons from light through glass, accumulates in hash grid using atomics
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform PushConstants {
+    uint gridWidth;        // Ray grid dimensions
+    uint gridHeight;
+    uint numPrimitives;
+    uint numMaterials;
+    // Light parameters
+    float lightPosX, lightPosY, lightPosZ;
+    float lightDirX, lightDirY, lightDirZ;
+    float lightIntensity;
+    uint lightType;        // 0=directional(sun), 1=point, 2=spot
+    float lightRadius;
+    // Floor parameters
+    float floorY;
+    float worldMinX, worldMinZ;
+    float worldMaxX, worldMaxZ;
+    uint _padMap0, _padMap1;  // Padding for alignment
+} pc;
+
+struct CSGPrimitive {
+    float x, y, z;
+    uint type;
+    float param0, param1, param2;
+    float _pad;
+};
+
+struct CSGTransform {
+    float rotX, rotY, rotZ;
+    float scale;
+};
+
+struct Material {
+    float r, g, b;
+    uint type;
+    float roughness, metallic, ior, emissive;
+};  // Must match ray.comp - 32 bytes
+
+layout(std430, binding = 0) readonly buffer Primitives { CSGPrimitive primitives[]; };
+layout(std430, binding = 1) readonly buffer Transforms { CSGTransform transforms[]; };
+layout(std430, binding = 2) readonly buffer Materials { Material materials[]; };
+layout(std430, binding = 3) buffer CausticHashMap { uint causticCells[]; };  // Atomic accumulation
+layout(std430, binding = 4) readonly buffer PrimToMaterial { uint primMaterialIds[]; };
+
+// 2D grid parameters - direct indexing, no hash collisions
+// Must match ray.comp exactly
+const float CAUSTIC_WORLD_MIN = -15.0;
+const float CAUSTIC_WORLD_MAX = 15.0;
+const uint CAUSTIC_GRID_SIZE = 512;  // 512x512 grid
+const float CAUSTIC_CELL_SIZE = (CAUSTIC_WORLD_MAX - CAUSTIC_WORLD_MIN) / float(CAUSTIC_GRID_SIZE);
+
+// Direct 2D index from world XZ position (floor is at fixed Y)
+// Index = ix * GRID_SIZE + iz (X is major axis)
+uint causticIndex2D(vec3 pos) {
+    float u = (pos.x - CAUSTIC_WORLD_MIN) / (CAUSTIC_WORLD_MAX - CAUSTIC_WORLD_MIN);
+    float v = (pos.z - CAUSTIC_WORLD_MIN) / (CAUSTIC_WORLD_MAX - CAUSTIC_WORLD_MIN);
+    uint ix = uint(clamp(u * float(CAUSTIC_GRID_SIZE), 0.0, float(CAUSTIC_GRID_SIZE - 1)));
+    uint iz = uint(clamp(v * float(CAUSTIC_GRID_SIZE), 0.0, float(CAUSTIC_GRID_SIZE - 1)));
+    return ix * CAUSTIC_GRID_SIZE + iz;  // X major
+}
+
+const uint MAT_GLASS = 2;
+const uint PRIM_SPHERE = 0;
+const uint PRIM_BOX = 1;
+
+const uint LIGHT_DIRECTIONAL = 0;
+const uint LIGHT_POINT = 1;
+const uint LIGHT_SPOT = 2;
+
+vec3 refractRay(vec3 I, vec3 N, float eta) {
+    float cosi = dot(-I, N);
+    float k = 1.0 - eta * eta * (1.0 - cosi * cosi);
+    if (k < 0.0) return vec3(0.0);
+    return eta * I + (eta * cosi - sqrt(k)) * N;
+}
+
+float hitSphere(vec3 ro, vec3 rd, vec3 center, float radius) {
+    vec3 oc = ro - center;
+    float b = dot(oc, rd);
+    float c = dot(oc, oc) - radius * radius;
+    float h = b * b - c;
+    if (h < 0.0) return -1.0;
+    return -b - sqrt(h);
+}
+
+float hitSphereFar(vec3 ro, vec3 rd, vec3 center, float radius) {
+    vec3 oc = ro - center;
+    float b = dot(oc, rd);
+    float c = dot(oc, oc) - radius * radius;
+    float h = b * b - c;
+    if (h < 0.0) return -1.0;
+    return -b + sqrt(h);
+}
+
+bool hitBox(vec3 ro, vec3 rd, vec3 center, vec3 half_, out float tNear, out float tFar, out vec3 normal) {
+    vec3 invRd = 1.0 / rd;
+    vec3 t1 = (center - half_ - ro) * invRd;
+    vec3 t2 = (center + half_ - ro) * invRd;
+    vec3 tMin = min(t1, t2);
+    vec3 tMax = max(t1, t2);
+    tNear = max(max(tMin.x, tMin.y), tMin.z);
+    tFar = min(min(tMax.x, tMax.y), tMax.z);
+    if (tNear > tFar || tFar < 0.0) return false;
+    if (tNear == tMin.x) normal = vec3(-sign(rd.x), 0, 0);
+    else if (tNear == tMin.y) normal = vec3(0, -sign(rd.y), 0);
+    else normal = vec3(0, 0, -sign(rd.z));
+    return true;
+}
+
+vec3 boxExitNormal(vec3 pos, vec3 center, vec3 half_) {
+    vec3 local = pos - center;
+    vec3 d = abs(local) - half_;
+    if (d.x > d.y && d.x > d.z) return vec3(sign(local.x), 0, 0);
+    if (d.y > d.z) return vec3(0, sign(local.y), 0);
+    return vec3(0, 0, sign(local.z));
+}
+
+// Trace ray through glass, return floor hit position (vec3(-1000) if no hit)
+// Also returns the primitive index that was hit via out parameter
+vec3 tracePhoton(vec3 ro, vec3 rd, out int hitPrimitive) {
+    hitPrimitive = -1;
+    // Find closest glass primitive
+    float bestT = 1e10;
+    int bestPrim = -1;
+
+    for (uint i = 0; i < pc.numPrimitives; i++) {
+        uint matId = primMaterialIds[i];
+        if (matId >= pc.numMaterials) continue;
+        if (materials[matId].type != MAT_GLASS) continue;
+
+        CSGPrimitive prim = primitives[i];
+        CSGTransform xform = transforms[i];
+        vec3 center = vec3(prim.x, prim.y, prim.z);
+        float scale = xform.scale;
+
+        float t = -1.0;
+        if (prim.type == PRIM_SPHERE) {
+            t = hitSphere(ro, rd, center, prim.param0 * scale);
+        } else if (prim.type == PRIM_BOX) {
+            vec3 half_ = vec3(prim.param0, prim.param1, prim.param2) * scale;
+            float tNear, tFar;
+            vec3 n;
+            if (hitBox(ro, rd, center, half_, tNear, tFar, n)) {
+                t = tNear;
+            }
+        }
+
+        if (t > 0.0 && t < bestT) {
+            bestT = t;
+            bestPrim = int(i);
+        }
+    }
+
+    if (bestPrim < 0) return vec3(-1000.0);  // Sentinel for "no hit"
+
+    hitPrimitive = bestPrim;  // Return which primitive was hit
+
+    // Trace through glass
+    CSGPrimitive prim = primitives[bestPrim];
+    CSGTransform xform = transforms[bestPrim];
+    vec3 center = vec3(prim.x, prim.y, prim.z);
+    float scale = xform.scale;
+
+    uint matId = primMaterialIds[bestPrim];
+    float ior = materials[matId].ior > 1.0 ? materials[matId].ior : 1.5;
+
+    vec3 hitEntry = ro + rd * bestT;
+    vec3 normalEntry, normalExit, hitExit;
+    vec3 refracted;
+
+    if (prim.type == PRIM_SPHERE) {
+        float radius = prim.param0 * scale;
+        normalEntry = normalize(hitEntry - center);
+
+        refracted = refractRay(rd, normalEntry, 1.0 / ior);
+        if (length(refracted) < 0.5) return vec3(-1000.0);
+
+        float tExit = hitSphereFar(hitEntry + refracted * 0.001, refracted, center, radius);
+        if (tExit < 0.0) return vec3(-1000.0);
+
+        hitExit = hitEntry + refracted * (tExit + 0.001);
+        normalExit = normalize(hitExit - center);
+    } else {
+        vec3 half_ = vec3(prim.param0, prim.param1, prim.param2) * scale;
+        float tNear, tFar;
+        vec3 n;
+        hitBox(ro, rd, center, half_, tNear, tFar, n);
+        normalEntry = n;
+
+        refracted = refractRay(rd, normalEntry, 1.0 / ior);
+        if (length(refracted) < 0.5) return vec3(-1000.0);
+
+        float tN2, tF2;
+        vec3 n2;
+        if (!hitBox(hitEntry + refracted * 0.01, refracted, center, half_, tN2, tF2, n2)) {
+            return vec3(-1000.0);
+        }
+
+        hitExit = hitEntry + refracted * (tF2 + 0.01);
+        normalExit = boxExitNormal(hitExit, center, half_);
+    }
+
+    // Refract out
+    vec3 exitDir = refractRay(refracted, -normalExit, ior);
+    if (length(exitDir) < 0.5) return vec3(-1000.0);
+    exitDir = normalize(exitDir);
+
+    // Hit floor
+    if (abs(exitDir.y) < 0.001) return vec3(-1000.0);
+    float tFloor = (pc.floorY - hitExit.y) / exitDir.y;
+    if (tFloor < 0.0 || tFloor > 100.0) return vec3(-1000.0);
+
+    return hitExit + exitDir * tFloor;
+}
+
+// (CAUSTIC_WORLD_MIN/MAX defined at top of file)
+
+void main() {
+    ivec2 rayIdx = ivec2(gl_GlobalInvocationID.xy);
+    if (rayIdx.x >= int(pc.gridWidth) || rayIdx.y >= int(pc.gridHeight)) return;
+
+    // Normalized grid coordinates [-1, 1]
+    float u = (float(rayIdx.x) / float(pc.gridWidth - 1)) * 2.0 - 1.0;
+    float v = (float(rayIdx.y) / float(pc.gridHeight - 1)) * 2.0 - 1.0;
+
+    vec3 lightDir = normalize(vec3(pc.lightDirX, pc.lightDirY, pc.lightDirZ));
+    vec3 lightPos = vec3(pc.lightPosX, pc.lightPosY, pc.lightPosZ);
+
+    // Build orthonormal basis for light
+    vec3 up = abs(lightDir.y) > 0.99 ? vec3(1, 0, 0) : vec3(0, 1, 0);
+    vec3 right = normalize(cross(up, lightDir));
+    vec3 forward = cross(lightDir, right);
+
+    vec3 ro, rd;
+    float raySpacing;
+
+    if (pc.lightType == LIGHT_DIRECTIONAL) {
+        // Directional: parallel rays covering world XZ bounds
+        // Offset ray origins to account for light angle hitting objects at different heights
+        float extent = 20.0;  // Cover ±20 world units
+        raySpacing = extent * 2.0 / float(pc.gridWidth);
+
+        // Start high and offset in opposite direction of light travel
+        // so rays passing through objects land on the floor within bounds
+        float startY = 100.0;
+        vec3 offset = -lightDir * 80.0;  // Move origin back along light direction
+        ro = vec3(u * extent, 0.0, v * extent) + offset;
+        ro.y = startY;
+        rd = lightDir;
+    } else if (pc.lightType == LIGHT_POINT) {
+        // Point light: rays emanate from point in hemisphere toward floor
+        float angle = 0.8;  // Cone half-angle
+        rd = normalize(lightDir + right * u * angle + forward * v * angle);
+        ro = lightPos;
+        raySpacing = angle * 2.0 / float(pc.gridWidth);
+    } else {
+        // Spot light: rays within cone
+        float angle = pc.lightRadius;  // Cone half-angle in radians
+        rd = normalize(lightDir + right * u * angle + forward * v * angle);
+        ro = lightPos;
+        raySpacing = angle * 2.0 / float(pc.gridWidth);
+    }
+
+    // DEBUG: Test ray coverage by computing direct floor hit (bypass glass tracing)
+    // Remove this debug block after testing
+    #if 0
+    {
+        // Direct floor hit without glass
+        float tFloor = (pc.floorY - ro.y) / rd.y;
+        if (tFloor > 0.0) {
+            vec3 floorHit = ro + rd * tFloor;
+            if (floorHit.x >= CAUSTIC_WORLD_MIN && floorHit.x <= CAUSTIC_WORLD_MAX &&
+                floorHit.z >= CAUSTIC_WORLD_MIN && floorHit.z <= CAUSTIC_WORLD_MAX) {
+                uint debugIdx = causticIndex2D(floorHit);
+                atomicAdd(causticCells[debugIdx], 100);
+            }
+        }
+        return;  // Skip glass tracing for debug
+    }
+    #endif
+
+    // Trace center ray (returns vec3(-1000) for no hit)
+    int primCenter, primRight, primUp;
+    vec3 hitCenter = tracePhoton(ro, rd, primCenter);
+    if (hitCenter.x < -100.0) return;  // Check for sentinel, not negative coords
+
+    // Check if hit is within our map bounds (fixed bounds matching ray.comp)
+    if (hitCenter.x < CAUSTIC_WORLD_MIN || hitCenter.x > CAUSTIC_WORLD_MAX ||
+        hitCenter.z < CAUSTIC_WORLD_MIN || hitCenter.z > CAUSTIC_WORLD_MAX) {
+        return;
+    }
+
+    // Compute area ratio using neighboring rays
+    // For directional light with XZ grid, neighbors are simply +X and +Z
+    vec3 roRight = (pc.lightType == LIGHT_DIRECTIONAL) ? ro + vec3(raySpacing, 0.0, 0.0) : ro + right * raySpacing;
+    vec3 roUp = (pc.lightType == LIGHT_DIRECTIONAL) ? ro + vec3(0.0, 0.0, raySpacing) : ro + forward * raySpacing;
+
+    // For point/spot, direction also changes
+    vec3 rdRight = rd, rdUp = rd;
+    if (pc.lightType != LIGHT_DIRECTIONAL) {
+        float du = 1.0 / float(pc.gridWidth - 1) * 2.0;
+        float angle = (pc.lightType == LIGHT_SPOT) ? pc.lightRadius : 0.8;
+        rdRight = normalize(lightDir + right * (u + du) * angle + forward * v * angle);
+        rdUp = normalize(lightDir + right * u * angle + forward * (v + du) * angle);
+    }
+
+    vec3 hitRight = tracePhoton(roRight, rdRight, primRight);
+    vec3 hitUp = tracePhoton(roUp, rdUp, primUp);
+
+    // Require all 3 rays to trace through glass (can be different primitives)
+    if (hitRight.x < -100.0 || hitUp.x < -100.0) {
+        return;  // Neighbor missed glass entirely
+    }
+
+    // If neighbors hit different primitives, use a distance check instead
+    // to filter out wildly different floor positions
+    if (primRight != primCenter || primUp != primCenter) {
+        // Allow if floor positions are reasonably close (within 2 units)
+        float distRight = length(hitRight - hitCenter);
+        float distUp = length(hitUp - hitCenter);
+        if (distRight > 2.0 || distUp > 2.0) {
+            return;  // Floor positions too far apart - unreliable area calc
+        }
+    }
+
+    // Compute area compression
+    vec3 dRight = hitRight - hitCenter;
+    vec3 dUp = hitUp - hitCenter;
+    float refractedArea = length(cross(dRight, dUp));
+
+    float origArea = raySpacing * raySpacing;
+
+    // Filter out degenerate cases (extreme focusing or divergence)
+    if (refractedArea < 0.0001 || refractedArea > origArea * 100.0) {
+        return;  // Skip outliers that would create bright dots
+    }
+
+    float intensity = origArea / refractedArea;
+    intensity = clamp(intensity, 0.0, 10.0);  // Tighter clamp to avoid hotspots
+
+    // For point/spot lights, also apply distance falloff
+    if (pc.lightType != LIGHT_DIRECTIONAL) {
+        float dist = length(hitCenter - lightPos);
+        intensity /= (1.0 + dist * dist * 0.01);
+    }
+
+    // Compute intensity contribution (scale for fixed-point storage)
+    // Scale up for accumulation, will be normalized when reading
+    float contribution = intensity * pc.lightIntensity * 1000.0;
+    uint fixedContrib = uint(clamp(contribution, 0.0, 1000000.0));
+
+    if (fixedContrib == 0) return;
+
+    // Atomic accumulate to 2D grid cell (direct index, no collisions)
+    uint cellIndex = causticIndex2D(hitCenter);
+    atomicAdd(causticCells[cellIndex], fixedContrib);
+}

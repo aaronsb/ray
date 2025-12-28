@@ -13,6 +13,10 @@
 #include <algorithm>
 #include <cstring>
 
+// Feature flag for GPU caustics (area-ratio method with caustic map)
+// Based on Evan Wallace's technique adapted for compute shader
+#define FEATURE_GPU_CAUSTICS 1
+
 RayRenderer::RayRenderer(QVulkanWindow* window,
                                const QString& scenePath)
     : m_window(window), m_scenePath(scenePath)
@@ -81,13 +85,15 @@ void RayRenderer::initResources() {
                 printf("  Emissive:   %u area lights\n", m_lights.emissiveCount());
             }
 
-            // Build GI Gaussians from CSG primitives
+            // Build GI Gaussians from CSG primitives (for indirect illumination)
+            // Caustics are handled separately by GPU caustic map
             m_giGaussians.placeOnCSG(m_csgScene, m_materials);
 
-            // Trace caustic photons through glass objects
-            uint32_t preCount = m_giGaussians.count();
-            m_giGaussians.traceCausticPhotons(m_csgScene, m_materials, m_lights.sun, 256);
-            uint32_t causticCount = m_giGaussians.count() - preCount;
+            // Cap total gaussians to prevent GPU timeout
+            constexpr uint32_t MAX_GAUSSIANS = 4096;
+            if (m_giGaussians.count() > MAX_GAUSSIANS) {
+                m_giGaussians.truncate(MAX_GAUSSIANS);
+            }
 
             if (m_giGaussians.count() > 0) {
                 // Compute direct lighting for Gaussians
@@ -96,11 +102,7 @@ void RayRenderer::initResources() {
                                                      m_lights.spotLights);
                 // Propagate light between Gaussians (radiosity)
                 m_giGaussians.propagate(3);
-                printf("  GI Gauss:   %u gaussians", m_giGaussians.count());
-                if (causticCount > 0) {
-                    printf(" (%u caustic)", causticCount);
-                }
-                printf("\n");
+                printf("  GI Gauss:   %u gaussians\n", m_giGaussians.count());
             }
 
             sceneLoaded = true;
@@ -118,6 +120,10 @@ void RayRenderer::initResources() {
 
     createPatchBuffers();
     createComputePipeline();
+#if FEATURE_GPU_CAUSTICS
+    createCausticsPipeline();
+    runCausticsPass();
+#endif
 }
 
 void RayRenderer::initSwapChainResources() {
@@ -293,6 +299,43 @@ void RayRenderer::releaseResources() {
         m_devFuncs->vkFreeMemory(dev, m_gaussianBufferMemory, nullptr);
         m_gaussianBufferMemory = VK_NULL_HANDLE;
     }
+
+#if FEATURE_GPU_CAUSTICS
+    // Caustics pipeline resources
+    if (m_causticsPipeline) {
+        m_devFuncs->vkDestroyPipeline(dev, m_causticsPipeline, nullptr);
+        m_causticsPipeline = VK_NULL_HANDLE;
+    }
+    if (m_causticsPipelineLayout) {
+        m_devFuncs->vkDestroyPipelineLayout(dev, m_causticsPipelineLayout, nullptr);
+        m_causticsPipelineLayout = VK_NULL_HANDLE;
+    }
+    if (m_causticsDescriptorSetLayout) {
+        m_devFuncs->vkDestroyDescriptorSetLayout(dev, m_causticsDescriptorSetLayout, nullptr);
+        m_causticsDescriptorSetLayout = VK_NULL_HANDLE;
+    }
+    if (m_causticsDescriptorPool) {
+        m_devFuncs->vkDestroyDescriptorPool(dev, m_causticsDescriptorPool, nullptr);
+        m_causticsDescriptorPool = VK_NULL_HANDLE;
+    }
+    if (m_causticsPrimMaterialBuffer) {
+        m_devFuncs->vkDestroyBuffer(dev, m_causticsPrimMaterialBuffer, nullptr);
+        m_causticsPrimMaterialBuffer = VK_NULL_HANDLE;
+    }
+    if (m_causticsPrimMaterialBufferMemory) {
+        m_devFuncs->vkFreeMemory(dev, m_causticsPrimMaterialBufferMemory, nullptr);
+        m_causticsPrimMaterialBufferMemory = VK_NULL_HANDLE;
+    }
+    // Caustic hash buffer
+    if (m_causticHashBuffer) {
+        m_devFuncs->vkDestroyBuffer(dev, m_causticHashBuffer, nullptr);
+        m_causticHashBuffer = VK_NULL_HANDLE;
+    }
+    if (m_causticHashBufferMemory) {
+        m_devFuncs->vkFreeMemory(dev, m_causticHashBufferMemory, nullptr);
+        m_causticHashBufferMemory = VK_NULL_HANDLE;
+    }
+#endif
 }
 
 void RayRenderer::startNextFrame() {
@@ -439,10 +482,10 @@ void RayRenderer::createPatchBuffers() {
 void RayRenderer::createDescriptorSet() {
     VkDevice dev = m_window->device();
 
-    // Create descriptor pool (2 images + 13 buffers)
+    // Create descriptor pool (2 storage images + 14 buffers)
     std::array<VkDescriptorPoolSize, 2> poolSizes{};
     poolSizes[0] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2};  // output + accumulation
-    poolSizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 13};  // patches, BVH, indices, instances, CSG prims/nodes/roots/bvh/transforms, materials, lights, emissive, gaussians
+    poolSizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 14};  // patches, BVH, indices, instances, CSG prims/nodes/roots/bvh/transforms, materials, lights, emissive, gaussians, caustic hash
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -539,7 +582,14 @@ void RayRenderer::createDescriptorSet() {
     gaussianBufferInfo.offset = 0;
     gaussianBufferInfo.range = VK_WHOLE_SIZE;
 
-    std::array<VkWriteDescriptorSet, 15> writes{};
+#if FEATURE_GPU_CAUSTICS
+    VkDescriptorBufferInfo causticHashBufInfo{};
+    causticHashBufInfo.buffer = m_causticHashBuffer;
+    causticHashBufInfo.offset = 0;
+    causticHashBufInfo.range = VK_WHOLE_SIZE;
+#endif
+
+    std::array<VkWriteDescriptorSet, 16> writes{};
 
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[0].dstSet = m_descriptorSet;
@@ -653,14 +703,26 @@ void RayRenderer::createDescriptorSet() {
     writes[14].descriptorCount = 1;
     writes[14].pBufferInfo = &csgTransformBufferInfo;
 
+    // Caustic hash buffer (binding 15) - only write if caustics enabled
+#if FEATURE_GPU_CAUSTICS
+    writes[15].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[15].dstSet = m_descriptorSet;
+    writes[15].dstBinding = 15;
+    writes[15].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[15].descriptorCount = 1;
+    writes[15].pBufferInfo = &causticHashBufInfo;
     m_devFuncs->vkUpdateDescriptorSets(dev, writes.size(), writes.data(), 0, nullptr);
+#else
+    // Skip binding 15 when caustics disabled
+    m_devFuncs->vkUpdateDescriptorSets(dev, 15, writes.data(), 0, nullptr);
+#endif
 }
 
 void RayRenderer::createComputePipeline() {
     VkDevice dev = m_window->device();
 
-    // Descriptor set layout (15 bindings: output image, 4 buffers, accum image, 4 CSG buffers, materials, lights, emissive, gaussians, transforms)
-    std::array<VkDescriptorSetLayoutBinding, 15> bindings{};
+    // Descriptor set layout (16 bindings: output image, 4 buffers, accum image, 4 CSG buffers, materials, lights, emissive, gaussians, transforms, caustic map)
+    std::array<VkDescriptorSetLayoutBinding, 16> bindings{};
 
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -744,6 +806,12 @@ void RayRenderer::createComputePipeline() {
     bindings[14].descriptorCount = 1;
     bindings[14].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
+    // Caustic hash buffer (binding 15)
+    bindings[15].binding = 15;
+    bindings[15].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[15].descriptorCount = 1;
+    bindings[15].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     layoutInfo.bindingCount = bindings.size();
@@ -789,6 +857,403 @@ void RayRenderer::createComputePipeline() {
 
     m_devFuncs->vkDestroyShaderModule(dev, shaderModule, nullptr);
 }
+
+#if FEATURE_GPU_CAUSTICS
+// Push constants for caustics shader (area-ratio method)
+struct CausticsPushConstants {
+    uint32_t gridWidth;
+    uint32_t gridHeight;
+    uint32_t numPrimitives;
+    uint32_t numMaterials;
+    float lightPosX, lightPosY, lightPosZ;
+    float lightDirX, lightDirY, lightDirZ;
+    float lightIntensity;
+    uint32_t lightType;  // 0=directional, 1=point, 2=spot
+    float lightRadius;
+    float floorY;
+    float worldMinX, worldMinZ;
+    float worldMaxX, worldMaxZ;
+    uint32_t _padMap0, _padMap1;  // Padding for alignment
+};
+
+void RayRenderer::createCausticsPipeline() {
+    VkDevice dev = m_window->device();
+
+    // Create caustic hash buffer (spatial hash for atomic accumulation)
+    VkDeviceSize hashBufSize = CAUSTIC_HASH_SIZE * sizeof(uint32_t);
+    createBuffer(hashBufSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                 m_causticHashBuffer, m_causticHashBufferMemory);
+    printf("  Created caustic hash buffer: %u cells (%.1f KB)\n", CAUSTIC_HASH_SIZE, hashBufSize / 1024.0f);
+
+    // Create descriptor set layout for caustics (5 bindings)
+    // 0: Primitives, 1: Transforms, 2: Materials, 3: CausticHash (buffer), 4: PrimToMaterial
+    std::array<VkDescriptorSetLayoutBinding, 5> bindings{};
+
+    // Binding 0: Primitives
+    bindings[0].binding = 0;
+    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[0].descriptorCount = 1;
+    bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    // Binding 1: Transforms
+    bindings[1].binding = 1;
+    bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[1].descriptorCount = 1;
+    bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    // Binding 2: Materials
+    bindings[2].binding = 2;
+    bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[2].descriptorCount = 1;
+    bindings[2].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    // Binding 3: Caustic hash buffer (storage buffer for atomic writes)
+    bindings[3].binding = 3;
+    bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[3].descriptorCount = 1;
+    bindings[3].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    // Binding 4: Primitive-to-material mapping
+    bindings[4].binding = 4;
+    bindings[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[4].descriptorCount = 1;
+    bindings[4].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    VkDescriptorSetLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+    layoutInfo.pBindings = bindings.data();
+
+    if (m_devFuncs->vkCreateDescriptorSetLayout(dev, &layoutInfo, nullptr, &m_causticsDescriptorSetLayout) != VK_SUCCESS) {
+        qWarning("Failed to create caustics descriptor set layout");
+        return;
+    }
+
+    // Create descriptor pool (5 storage buffers)
+    std::array<VkDescriptorPoolSize, 1> poolSizes{};
+    poolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    poolSizes[0].descriptorCount = 5;
+
+    VkDescriptorPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.maxSets = 1;
+    poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+    poolInfo.pPoolSizes = poolSizes.data();
+
+    if (m_devFuncs->vkCreateDescriptorPool(dev, &poolInfo, nullptr, &m_causticsDescriptorPool) != VK_SUCCESS) {
+        qWarning("Failed to create caustics descriptor pool");
+        return;
+    }
+
+    // Allocate descriptor set
+    VkDescriptorSetAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocInfo.descriptorPool = m_causticsDescriptorPool;
+    allocInfo.descriptorSetCount = 1;
+    allocInfo.pSetLayouts = &m_causticsDescriptorSetLayout;
+
+    if (m_devFuncs->vkAllocateDescriptorSets(dev, &allocInfo, &m_causticsDescriptorSet) != VK_SUCCESS) {
+        qWarning("Failed to allocate caustics descriptor set");
+        return;
+    }
+
+    // Create primitive-to-material mapping buffer
+    // Map each primitive to its material ID by scanning root nodes
+    size_t numPrims = m_csgScene.primitiveCount();
+    std::vector<uint32_t> primToMaterial(numPrims, 0xFFFFFFFF);  // Invalid = no material
+
+    const auto& nodes = m_csgScene.nodes();
+    const auto& roots = m_csgScene.roots();
+    for (uint32_t rootIdx : roots) {
+        const auto& node = nodes[rootIdx];
+        // For primitive nodes, left is the primitive index
+        if (node.type == static_cast<uint32_t>(parametric::CSGNodeType::Primitive)) {
+            uint32_t primIdx = node.left;
+            if (primIdx < numPrims) {
+                primToMaterial[primIdx] = node.materialId;
+            }
+        }
+    }
+
+    size_t primMatBufSize = std::max(numPrims, size_t(1)) * sizeof(uint32_t);
+    createBuffer(primMatBufSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 m_causticsPrimMaterialBuffer, m_causticsPrimMaterialBufferMemory);
+
+    // Upload mapping
+    if (numPrims > 0) {
+        void* primMatData;
+        m_devFuncs->vkMapMemory(dev, m_causticsPrimMaterialBufferMemory, 0, primMatBufSize, 0, &primMatData);
+        memcpy(primMatData, primToMaterial.data(), primToMaterial.size() * sizeof(uint32_t));
+        m_devFuncs->vkUnmapMemory(dev, m_causticsPrimMaterialBufferMemory);
+    }
+
+    // Update descriptor set
+    VkDescriptorBufferInfo primInfo{};
+    primInfo.buffer = m_csgPrimitiveBuffer;
+    primInfo.offset = 0;
+    primInfo.range = VK_WHOLE_SIZE;
+
+    VkDescriptorBufferInfo xformInfo{};
+    xformInfo.buffer = m_csgTransformBuffer;
+    xformInfo.offset = 0;
+    xformInfo.range = VK_WHOLE_SIZE;
+
+    VkDescriptorBufferInfo matInfo{};
+    matInfo.buffer = m_materialBuffer;
+    matInfo.offset = 0;
+    matInfo.range = VK_WHOLE_SIZE;
+
+    VkDescriptorBufferInfo causticHashInfo{};
+    causticHashInfo.buffer = m_causticHashBuffer;
+    causticHashInfo.offset = 0;
+    causticHashInfo.range = VK_WHOLE_SIZE;
+
+    VkDescriptorBufferInfo primMatInfo{};
+    primMatInfo.buffer = m_causticsPrimMaterialBuffer;
+    primMatInfo.offset = 0;
+    primMatInfo.range = VK_WHOLE_SIZE;
+
+    std::array<VkWriteDescriptorSet, 5> writes{};
+
+    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[0].dstSet = m_causticsDescriptorSet;
+    writes[0].dstBinding = 0;
+    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[0].descriptorCount = 1;
+    writes[0].pBufferInfo = &primInfo;
+
+    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[1].dstSet = m_causticsDescriptorSet;
+    writes[1].dstBinding = 1;
+    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[1].descriptorCount = 1;
+    writes[1].pBufferInfo = &xformInfo;
+
+    writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[2].dstSet = m_causticsDescriptorSet;
+    writes[2].dstBinding = 2;
+    writes[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[2].descriptorCount = 1;
+    writes[2].pBufferInfo = &matInfo;
+
+    writes[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[3].dstSet = m_causticsDescriptorSet;
+    writes[3].dstBinding = 3;
+    writes[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[3].descriptorCount = 1;
+    writes[3].pBufferInfo = &causticHashInfo;
+
+    writes[4].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[4].dstSet = m_causticsDescriptorSet;
+    writes[4].dstBinding = 4;
+    writes[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[4].descriptorCount = 1;
+    writes[4].pBufferInfo = &primMatInfo;
+
+    m_devFuncs->vkUpdateDescriptorSets(dev, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+
+    // Create pipeline layout
+    VkPushConstantRange pushConstantRange{};
+    pushConstantRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pushConstantRange.offset = 0;
+    pushConstantRange.size = sizeof(CausticsPushConstants);
+
+    VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+    pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipelineLayoutInfo.setLayoutCount = 1;
+    pipelineLayoutInfo.pSetLayouts = &m_causticsDescriptorSetLayout;
+    pipelineLayoutInfo.pushConstantRangeCount = 1;
+    pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
+
+    if (m_devFuncs->vkCreatePipelineLayout(dev, &pipelineLayoutInfo, nullptr, &m_causticsPipelineLayout) != VK_SUCCESS) {
+        qWarning("Failed to create caustics pipeline layout");
+        return;
+    }
+
+    // Create compute pipeline
+    QString shaderPath = QCoreApplication::applicationDirPath() + "/shaders/caustics.spv";
+    VkShaderModule shaderModule = createShaderModule(shaderPath);
+
+    VkPipelineShaderStageCreateInfo stageInfo{};
+    stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    stageInfo.module = shaderModule;
+    stageInfo.pName = "main";
+
+    VkComputePipelineCreateInfo pipelineInfo{};
+    pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    pipelineInfo.stage = stageInfo;
+    pipelineInfo.layout = m_causticsPipelineLayout;
+
+    if (m_devFuncs->vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_causticsPipeline) != VK_SUCCESS) {
+        qWarning("Failed to create caustics compute pipeline");
+    }
+
+    m_devFuncs->vkDestroyShaderModule(dev, shaderModule, nullptr);
+    printf("  Caustics pipeline created (area-ratio method)\n");
+}
+
+void RayRenderer::runCausticsPass() {
+    if (!m_causticsPipeline || !m_causticsNeedUpdate) return;
+    if (m_csgScene.primitiveCount() == 0) {
+        printf("  Caustics: no CSG primitives, skipping\n");
+        return;
+    }
+    if (!m_floor.enabled) {
+        printf("  Caustics: no floor, skipping\n");
+        return;
+    }
+
+    // Count glass primitives for debug
+    int glassCount = 0;
+    const auto& prims = m_csgScene.primitives();
+    const auto& nodes = m_csgScene.nodes();
+    const auto& roots = m_csgScene.roots();
+    for (uint32_t rootIdx : roots) {
+        const auto& node = nodes[rootIdx];
+        if (node.type == static_cast<uint32_t>(parametric::CSGNodeType::Primitive)) {
+            uint32_t primIdx = node.left;
+            uint32_t matId = node.materialId;
+            if (primIdx < prims.size() && matId < m_materials.count()) {
+                const auto& mat = m_materials.materials()[matId];
+                if (mat.type == 2) {  // MAT_GLASS = 2
+                    glassCount++;
+                    printf("  Caustics: glass prim %u at (%.1f, %.1f, %.1f) r=%.1f matId=%u\n",
+                           primIdx, prims[primIdx].x, prims[primIdx].y, prims[primIdx].z,
+                           prims[primIdx].param0, matId);
+                }
+            }
+        }
+    }
+    printf("  Caustics: %d glass primitives out of %zu total, floor Y=%.1f\n",
+           glassCount, prims.size(), m_floor.y);
+
+    VkDevice dev = m_window->device();
+
+    // Get sun direction (direction TO sun, so negate for direction FROM sun)
+    float sunDirX, sunDirY, sunDirZ;
+    m_lights.sun.getDirection(sunDirX, sunDirY, sunDirZ);
+    printf("  Caustics: sun dir FROM sun = (%.3f, %.3f, %.3f)\n",
+           -sunDirX, -sunDirY, -sunDirZ);
+
+    // Compute world bounds for caustic map coverage
+    // Use CSG primitive bounds
+    float worldMinX = -10.0f, worldMaxX = 10.0f;
+    float worldMinZ = -10.0f, worldMaxZ = 10.0f;
+    if (!prims.empty()) {
+        worldMinX = worldMaxX = prims[0].x;
+        worldMinZ = worldMaxZ = prims[0].z;
+        for (const auto& prim : prims) {
+            float extent = std::max({prim.param0, prim.param1, prim.param2}) * 2.0f;
+            worldMinX = std::min(worldMinX, prim.x - extent);
+            worldMaxX = std::max(worldMaxX, prim.x + extent);
+            worldMinZ = std::min(worldMinZ, prim.z - extent);
+            worldMaxZ = std::max(worldMaxZ, prim.z + extent);
+        }
+        // Expand bounds to catch refracted rays
+        float margin = 5.0f;
+        worldMinX -= margin;
+        worldMaxX += margin;
+        worldMinZ -= margin;
+        worldMaxZ += margin;
+    }
+
+    // Set up push constants for sun light (directional)
+    CausticsPushConstants pc{};
+    pc.gridWidth = 1024;   // Ray grid resolution (higher = more photons)
+    pc.gridHeight = 1024;  // 1M+ photons total
+    pc.numPrimitives = m_csgScene.primitiveCount();
+    pc.numMaterials = m_materials.count();
+    // Light position (not used for directional, but set high above scene)
+    pc.lightPosX = 0.0f;
+    pc.lightPosY = 100.0f;
+    pc.lightPosZ = 0.0f;
+    // Light direction (FROM sun, so negate getDirection which gives TO sun)
+    pc.lightDirX = -sunDirX;
+    pc.lightDirY = -sunDirY;
+    pc.lightDirZ = -sunDirZ;
+    pc.lightIntensity = m_lights.sun.intensity;
+    pc.lightType = 0;  // Directional
+    pc.lightRadius = 0.0f;
+    pc.floorY = m_floor.y;
+    pc.worldMinX = worldMinX;
+    pc.worldMinZ = worldMinZ;
+    pc.worldMaxX = worldMaxX;
+    pc.worldMaxZ = worldMaxZ;
+    pc._padMap0 = 0;
+    pc._padMap1 = 0;
+
+    // Create command buffer for caustics pass
+    VkCommandBufferAllocateInfo cmdAllocInfo{};
+    cmdAllocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cmdAllocInfo.commandPool = m_window->graphicsCommandPool();
+    cmdAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cmdAllocInfo.commandBufferCount = 1;
+
+    VkCommandBuffer cmdBuf;
+    m_devFuncs->vkAllocateCommandBuffers(dev, &cmdAllocInfo, &cmdBuf);
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+    m_devFuncs->vkBeginCommandBuffer(cmdBuf, &beginInfo);
+
+    // Clear caustic hash buffer to zero
+    m_devFuncs->vkCmdFillBuffer(cmdBuf, m_causticHashBuffer, 0, VK_WHOLE_SIZE, 0);
+
+    // Memory barrier before compute
+    VkMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    m_devFuncs->vkCmdPipelineBarrier(cmdBuf,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0, 1, &barrier, 0, nullptr, 0, nullptr);
+
+    m_devFuncs->vkCmdBindPipeline(cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, m_causticsPipeline);
+    m_devFuncs->vkCmdBindDescriptorSets(cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                         m_causticsPipelineLayout, 0, 1, &m_causticsDescriptorSet, 0, nullptr);
+    m_devFuncs->vkCmdPushConstants(cmdBuf, m_causticsPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+                                    0, sizeof(CausticsPushConstants), &pc);
+
+    // Dispatch ray grid (16x16 workgroup size in shader)
+    m_devFuncs->vkCmdDispatch(cmdBuf, (pc.gridWidth + 15) / 16, (pc.gridHeight + 15) / 16, 1);
+
+    // Memory barrier for buffer to be readable
+    VkMemoryBarrier readBarrier{};
+    readBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    readBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    readBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    m_devFuncs->vkCmdPipelineBarrier(cmdBuf,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0, 1, &readBarrier, 0, nullptr, 0, nullptr);
+
+    m_devFuncs->vkEndCommandBuffer(cmdBuf);
+
+    // Submit and wait
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &cmdBuf;
+
+    VkFence fence;
+    VkFenceCreateInfo fenceInfo{};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    m_devFuncs->vkCreateFence(dev, &fenceInfo, nullptr, &fence);
+
+    m_devFuncs->vkQueueSubmit(m_window->graphicsQueue(), 1, &submitInfo, fence);
+    m_devFuncs->vkWaitForFences(dev, 1, &fence, VK_TRUE, UINT64_MAX);
+
+    m_devFuncs->vkDestroyFence(dev, fence, nullptr);
+    m_devFuncs->vkFreeCommandBuffers(dev, m_window->graphicsCommandPool(), 1, &cmdBuf);
+
+    printf("  Caustics pass complete (%ux%u photons -> %u cell hash)\n", pc.gridWidth, pc.gridHeight, CAUSTIC_HASH_SIZE);
+    m_causticsNeedUpdate = false;
+}
+#endif // FEATURE_GPU_CAUSTICS
 
 void RayRenderer::recordComputeCommands(VkCommandBuffer cmdBuf) {
     QSize sz = m_window->swapChainImageSize();
@@ -840,7 +1305,7 @@ void RayRenderer::recordComputeCommands(VkCommandBuffer cmdBuf) {
     pc.bgB = m_background.b;
     pc.skyAmbient = m_lights.skyAmbient();
     pc.qualityLevel = m_qualityLevel;
-    pc.numGaussians = m_giGaussians.count();
+    pc.numGaussians = m_giGaussians.count();  // GI gaussians only (caustics use separate texture)
 
     m_devFuncs->vkCmdPushConstants(cmdBuf, m_pipelineLayout,
         VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RayPushConstants), &pc);
@@ -1005,7 +1470,10 @@ void RayRenderer::createGaussianBuffer() {
     VkDevice dev = m_window->device();
 
     const auto& gaussians = m_giGaussians.gaussians();
-    size_t bufSize = std::max(gaussians.size() * sizeof(GIGaussian), size_t(48));
+    // Reserve space for CPU gaussians + GPU caustics (up to 65536 more)
+    constexpr size_t MAX_GPU_CAUSTICS = 65536;
+    size_t totalCapacity = gaussians.size() + MAX_GPU_CAUSTICS;
+    size_t bufSize = std::max(totalCapacity * sizeof(GIGaussian), size_t(48));
 
     createBuffer(bufSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
