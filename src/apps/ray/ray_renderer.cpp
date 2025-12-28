@@ -1465,19 +1465,20 @@ void RayRenderer::buildAccelerationStructures() {
     }
 
     const auto& prims = m_csgScene.primitives();
-    if (prims.empty()) {
-        printf("  Skipping AS build - no CSG primitives\n");
+    if (prims.empty() && m_instances.empty()) {
+        printf("  Skipping AS build - no geometry\n");
         return;
     }
 
     VkDevice dev = m_window->device();
 
-    // Build AABBs for each CSG primitive
+    // Build AABBs for CSG primitives + Bezier instances
+    // Layout: [0..numPrims-1] = CSG primitives, [numPrims..] = Bezier instances
     std::vector<VkAabbPositionsKHR> aabbs;
-    aabbs.reserve(prims.size());
+    aabbs.reserve(prims.size() + m_instances.size());
 
+    // CSG primitive AABBs
     for (size_t i = 0; i < prims.size(); i++) {
-        // Get AABB from CSG scene
         parametric::AABB box = m_csgScene.computePrimitiveAABB(static_cast<uint32_t>(i));
 
         VkAabbPositionsKHR aabb{};
@@ -1488,6 +1489,67 @@ void RayRenderer::buildAccelerationStructures() {
         aabb.maxY = box.max.y;
         aabb.maxZ = box.max.z;
         aabbs.push_back(aabb);
+    }
+
+    // Bezier instance AABBs (transform local patch AABB to world space)
+    const auto& bvhNodes = m_patchGroup.bvhNodes();
+    if (!bvhNodes.empty() && !m_instances.empty()) {
+        // Local AABB from patch BVH root
+        const auto& root = bvhNodes[0];
+        float lMinX = root.minX, lMinY = root.minY, lMinZ = root.minZ;
+        float lMaxX = root.maxX, lMaxY = root.maxY, lMaxZ = root.maxZ;
+
+        for (const auto& inst : m_instances) {
+            // Transform 8 corners of local AABB to world space
+            float corners[8][3] = {
+                {lMinX, lMinY, lMinZ}, {lMaxX, lMinY, lMinZ},
+                {lMinX, lMaxY, lMinZ}, {lMaxX, lMaxY, lMinZ},
+                {lMinX, lMinY, lMaxZ}, {lMaxX, lMinY, lMaxZ},
+                {lMinX, lMaxY, lMaxZ}, {lMaxX, lMaxY, lMaxZ}
+            };
+
+            float wMinX = 1e20f, wMinY = 1e20f, wMinZ = 1e20f;
+            float wMaxX = -1e20f, wMaxY = -1e20f, wMaxZ = -1e20f;
+
+            for (int c = 0; c < 8; c++) {
+                // Scale
+                float x = corners[c][0] * inst.scale;
+                float y = corners[c][1] * inst.scale;
+                float z = corners[c][2] * inst.scale;
+
+                // Rotate XYZ (same order as shader)
+                float cx = std::cos(inst.rotX), sx = std::sin(inst.rotX);
+                float cy = std::cos(inst.rotY), sy = std::sin(inst.rotY);
+                float cz = std::cos(inst.rotZ), sz = std::sin(inst.rotZ);
+
+                // Rotate X
+                float y1 = y * cx - z * sx;
+                float z1 = y * sx + z * cx;
+                y = y1; z = z1;
+                // Rotate Y
+                float x1 = x * cy + z * sy;
+                z1 = -x * sy + z * cy;
+                x = x1; z = z1;
+                // Rotate Z
+                x1 = x * cz - y * sz;
+                y1 = x * sz + y * cz;
+                x = x1; y = y1;
+
+                // Translate
+                x += inst.posX;
+                y += inst.posY;
+                z += inst.posZ;
+
+                wMinX = std::min(wMinX, x); wMaxX = std::max(wMaxX, x);
+                wMinY = std::min(wMinY, y); wMaxY = std::max(wMaxY, y);
+                wMinZ = std::min(wMinZ, z); wMaxZ = std::max(wMaxZ, z);
+            }
+
+            VkAabbPositionsKHR aabb{};
+            aabb.minX = wMinX; aabb.minY = wMinY; aabb.minZ = wMinZ;
+            aabb.maxX = wMaxX; aabb.maxY = wMaxY; aabb.maxZ = wMaxZ;
+            aabbs.push_back(aabb);
+        }
     }
 
     // Create AABB buffer
@@ -1610,8 +1672,9 @@ void RayRenderer::buildAccelerationStructures() {
     m_devFuncs->vkDestroyBuffer(dev, scratchBuffer, nullptr);
     m_devFuncs->vkFreeMemory(dev, scratchMemory, nullptr);
 
-    printf("  Built BLAS: %zu CSG primitives, %.1f KB\n",
-           aabbs.size(), sizeInfo.accelerationStructureSize / 1024.0f);
+    printf("  Built BLAS: %zu CSG + %zu instances = %zu AABBs, %.1f KB\n",
+           prims.size(), m_instances.size(), aabbs.size(),
+           sizeInfo.accelerationStructureSize / 1024.0f);
 
     // Build TLAS with single instance referencing BLAS
     // Get BLAS device address

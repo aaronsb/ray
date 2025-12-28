@@ -664,8 +664,8 @@ vec3 tracePhoton(vec3 ro, vec3 rd, out int hitPrimitive, out float pathLength, o
     int bestPrim = -1;
     int bestInstance = -1;  // -1 = CSG primitive, >= 0 = Bezier instance index
 
-    // Use hardware ray query to find dielectric CSG primitives
-    // The TLAS contains AABBs for all primitives - we test actual shapes for AABB hits
+    // Use hardware ray query to find dielectric objects (CSG primitives + Bezier instances)
+    // AABB layout: [0..numPrimitives-1] = CSG, [numPrimitives..] = Bezier instances
     rayQueryEXT rayQuery;
     rayQueryInitializeEXT(rayQuery, tlas,
         gl_RayFlagsNoneEXT,  // No special flags
@@ -679,75 +679,79 @@ vec3 tracePhoton(vec3 ro, vec3 rd, out int hitPrimitive, out float pathLength, o
     while (rayQueryProceedEXT(rayQuery)) {
         // For AABB geometry, we get candidate intersections that need shape testing
         if (rayQueryGetIntersectionTypeEXT(rayQuery, false) == gl_RayQueryCandidateIntersectionAABBEXT) {
-            int i = rayQueryGetIntersectionPrimitiveIndexEXT(rayQuery, false);
-            if (i < 0 || i >= int(pc.numPrimitives)) continue;
+            int primIdx = rayQueryGetIntersectionPrimitiveIndexEXT(rayQuery, false);
 
-            uint primMatId = primMaterialIds[i];
-            if (primMatId >= pc.numMaterials) continue;
-            // Dielectrics have real IOR > 1.0 (default is 1.0 = no refraction)
-            float ior = materials[primMatId].ior;
-            if (ior <= 1.001) continue;
+            // Determine if this is a CSG primitive or Bezier instance
+            if (primIdx < int(pc.numPrimitives)) {
+                // CSG primitive
+                uint primMatId = primMaterialIds[primIdx];
+                if (primMatId >= pc.numMaterials) continue;
+                // Dielectrics have real IOR > 1.0 (default is 1.0 = no refraction)
+                float ior = materials[primMatId].ior;
+                if (ior <= 1.001) continue;
 
-            CSGPrimitive prim = primitives[i];
-            CSGTransform xform = transforms[i];
-            vec3 center = vec3(prim.x, prim.y, prim.z);
-            float scale = xform.scale;
+                CSGPrimitive prim = primitives[primIdx];
+                CSGTransform xform = transforms[primIdx];
+                vec3 center = vec3(prim.x, prim.y, prim.z);
+                float scale = xform.scale;
 
-            float t = -1.0;
-            if (prim.type == PRIM_SPHERE) {
-                t = hitSphere(ro, rd, center, prim.param0 * scale);
-            } else if (prim.type == PRIM_BOX) {
-                vec3 half_ = vec3(prim.param0, prim.param1, prim.param2) * scale;
-                float tNear, tFar;
-                vec3 nNear, nFar;
-                if (hitBox(ro, rd, center, half_, tNear, tFar, nNear, nFar)) {
-                    t = tNear;
+                float t = -1.0;
+                if (prim.type == PRIM_SPHERE) {
+                    t = hitSphere(ro, rd, center, prim.param0 * scale);
+                } else if (prim.type == PRIM_BOX) {
+                    vec3 half_ = vec3(prim.param0, prim.param1, prim.param2) * scale;
+                    float tNear, tFar;
+                    vec3 nNear, nFar;
+                    if (hitBox(ro, rd, center, half_, tNear, tFar, nNear, nFar)) {
+                        t = tNear;
+                    }
+                } else if (prim.type == PRIM_CYLINDER) {
+                    float tNear, tFar;
+                    vec3 nNear, nFar;
+                    if (hitCylinder(ro, rd, center, prim.param0 * scale, prim.param1 * scale, tNear, tFar, nNear, nFar)) {
+                        t = tNear;
+                    }
+                } else if (prim.type == PRIM_CONE) {
+                    float tNear, tFar;
+                    vec3 nNear, nFar;
+                    if (hitCone(ro, rd, center, prim.param0 * scale, prim.param1 * scale, tNear, tFar, nNear, nFar)) {
+                        t = tNear;
+                    }
+                } else if (prim.type == PRIM_TORUS) {
+                    float tNear, tFar;
+                    vec3 nNear, nFar;
+                    if (hitTorus(ro, rd, center, prim.param0 * scale, prim.param1 * scale, tNear, tFar, nNear, nFar)) {
+                        t = tNear;
+                    }
                 }
-            } else if (prim.type == PRIM_CYLINDER) {
-                float tNear, tFar;
-                vec3 nNear, nFar;
-                if (hitCylinder(ro, rd, center, prim.param0 * scale, prim.param1 * scale, tNear, tFar, nNear, nFar)) {
-                    t = tNear;
-                }
-            } else if (prim.type == PRIM_CONE) {
-                float tNear, tFar;
-                vec3 nNear, nFar;
-                if (hitCone(ro, rd, center, prim.param0 * scale, prim.param1 * scale, tNear, tFar, nNear, nFar)) {
-                    t = tNear;
-                }
-            } else if (prim.type == PRIM_TORUS) {
-                float tNear, tFar;
-                vec3 nNear, nFar;
-                if (hitTorus(ro, rd, center, prim.param0 * scale, prim.param1 * scale, tNear, tFar, nNear, nFar)) {
-                    t = tNear;
-                }
-            }
 
-            // If shape test passed and it's closer, confirm this intersection
-            if (t > 0.0 && t < bestT) {
-                bestT = t;
-                bestPrim = i;
-                bestInstance = -1;  // CSG primitive
-                // Generate intersection at this t value to update the committed hit
-                rayQueryGenerateIntersectionEXT(rayQuery, t);
-            }
-        }
-    }
+                // If shape test passed and it's closer, confirm this intersection
+                if (t > 0.0 && t < bestT) {
+                    bestT = t;
+                    bestPrim = primIdx;
+                    bestInstance = -1;  // CSG primitive
+                    rayQueryGenerateIntersectionEXT(rayQuery, t);
+                }
+            } else {
+                // Bezier instance (primIdx >= numPrimitives)
+                uint instIdx = uint(primIdx) - pc.numPrimitives;
+                if (instIdx >= pc.numInstances) continue;
 
-    // Check Bezier instances (dielectric teapots, etc.)
-    for (uint i = 0; i < pc.numInstances; i++) {
-        BezierInstance inst = instances[i];
-        if (inst.materialId >= pc.numMaterials) continue;
-        // Dielectrics have real IOR > 1.0
-        if (materials[inst.materialId].ior <= 1.001) continue;
+                BezierInstance inst = instances[instIdx];
+                if (inst.materialId >= pc.numMaterials) continue;
+                // Dielectrics have real IOR > 1.0
+                if (materials[inst.materialId].ior <= 1.001) continue;
 
-        float tNear, tFar;
-        vec3 nNear, nFar, wEntry, wExit;
-        if (hitInstanceSDF(i, ro, rd, tNear, tFar, nNear, nFar, wEntry, wExit)) {
-            if (tNear > 0.0 && tNear < bestT) {
-                bestT = tNear;
-                bestPrim = int(i);
-                bestInstance = int(i);  // Bezier instance
+                float tNear, tFar;
+                vec3 nNear, nFar, wEntry, wExit;
+                if (hitInstanceSDF(instIdx, ro, rd, tNear, tFar, nNear, nFar, wEntry, wExit)) {
+                    if (tNear > 0.0 && tNear < bestT) {
+                        bestT = tNear;
+                        bestPrim = int(instIdx);
+                        bestInstance = int(instIdx);  // Bezier instance
+                        rayQueryGenerateIntersectionEXT(rayQuery, tNear);
+                    }
+                }
             }
         }
     }
