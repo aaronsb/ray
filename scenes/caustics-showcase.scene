@@ -1,97 +1,137 @@
-; Caustics Showcase - Multiple rows demonstrating different effects
-; Row 1: Colored glass (8 spheres)
-; Row 2: Clear glass at varying heights (defocus demo)
-; Row 3: Clear glass with varying roughness
-; Row 4: Clear glass with varying IOR
+; Caustics Showcase - Arrays of glass objects demonstrating caustic variety
+; Features: cubes, cones, rods (cylinders), toruses, spheres, and teapots
+; Various glass colors and IOR values
 
 ; ============================================================================
-; Materials
+; Include teapot geometry
 ; ============================================================================
+(include "teapot.scene")
 
-; Row 1: Colored glass
-(material glass-red     (type glass) (rgb 1.0 0.2 0.2) (ior 1.5))
-(material glass-orange  (type glass) (rgb 1.0 0.6 0.2) (ior 1.5))
-(material glass-yellow  (type glass) (rgb 1.0 1.0 0.3) (ior 1.5))
-(material glass-green   (type glass) (rgb 0.3 1.0 0.3) (ior 1.5))
-(material glass-cyan    (type glass) (rgb 0.3 1.0 1.0) (ior 1.5))
-(material glass-blue    (type glass) (rgb 0.3 0.4 1.0) (ior 1.5))
-(material glass-purple  (type glass) (rgb 0.7 0.3 1.0) (ior 1.5))
-(material glass-magenta (type glass) (rgb 1.0 0.3 0.8) (ior 1.5))
+; ============================================================================
+; Glass Materials - Various colors and IOR values
+; ============================================================================
+; Standard glass (IOR 1.5)
+(material clear-glass (type glass) (rgb 0.98 0.98 1.0) (ior 1.5))
+(material red-glass (type glass) (rgb 1.0 0.3 0.3) (ior 1.5))
+(material green-glass (type glass) (rgb 0.3 1.0 0.4) (ior 1.5))
+(material blue-glass (type glass) (rgb 0.3 0.4 1.0) (ior 1.5))
+(material amber-glass (type glass) (rgb 1.0 0.7 0.2) (ior 1.5))
+(material purple-glass (type glass) (rgb 0.7 0.3 1.0) (ior 1.5))
+(material cyan-glass (type glass) (rgb 0.3 0.9 0.9) (ior 1.5))
+(material magenta-glass (type glass) (rgb 1.0 0.3 0.8) (ior 1.5))
 
-; Row 2: Clear glass (same material, different heights)
-(material glass-clear (type glass) (rgb 1.0 1.0 1.0) (ior 1.5))
+; Water-like (IOR 1.33) - softer caustics
+(material water (type glass) (rgb 0.85 0.95 1.0) (ior 1.33))
 
-; Row 3: Clear glass with varying roughness
-(material glass-rough-0 (type glass) (rgb 1.0 1.0 1.0) (ior 1.5) (roughness 0.0))
-(material glass-rough-1 (type glass) (rgb 1.0 1.0 1.0) (ior 1.5) (roughness 0.05))
-(material glass-rough-2 (type glass) (rgb 1.0 1.0 1.0) (ior 1.5) (roughness 0.1))
-(material glass-rough-3 (type glass) (rgb 1.0 1.0 1.0) (ior 1.5) (roughness 0.15))
-(material glass-rough-4 (type glass) (rgb 1.0 1.0 1.0) (ior 1.5) (roughness 0.2))
-(material glass-rough-5 (type glass) (rgb 1.0 1.0 1.0) (ior 1.5) (roughness 0.25))
-(material glass-rough-6 (type glass) (rgb 1.0 1.0 1.0) (ior 1.5) (roughness 0.3))
-(material glass-rough-7 (type glass) (rgb 1.0 1.0 1.0) (ior 1.5) (roughness 0.4))
+; Diamond-like (IOR 2.4) - intense caustics
+(material diamond (type glass) (rgb 1.0 1.0 1.0) (ior 2.4))
+(material pink-diamond (type glass) (rgb 1.0 0.85 0.9) (ior 2.4))
 
-; Row 4: Clear glass with varying IOR
-(material glass-ior-1 (type glass) (rgb 1.0 1.0 1.0) (ior 1.1))
-(material glass-ior-2 (type glass) (rgb 1.0 1.0 1.0) (ior 1.2))
-(material glass-ior-3 (type glass) (rgb 1.0 1.0 1.0) (ior 1.3))
-(material glass-ior-4 (type glass) (rgb 1.0 1.0 1.0) (ior 1.4))
-(material glass-ior-5 (type glass) (rgb 1.0 1.0 1.0) (ior 1.5))
-(material glass-ior-6 (type glass) (rgb 1.0 1.0 1.0) (ior 1.7))
-(material glass-ior-7 (type glass) (rgb 1.0 1.0 1.0) (ior 2.0))
-(material glass-ior-8 (type glass) (rgb 1.0 1.0 1.0) (ior 2.4))
+; Crystal (IOR 1.8) - moderate caustics
+(material crystal (type glass) (rgb 0.95 0.98 1.0) (ior 1.8))
 
-; Sun and floor
-(sun (azimuth 0) (elevation 75) (intensity 1.5) (color 1.0 1.0 1.0) (ambient 0.05))
-(material gray-floor (type diffuse) (rgb 0.3 0.3 0.3))
+; Reference materials
+(material white (type diffuse) (rgb 0.9 0.9 0.9))
+
+; ============================================================================
+; Environment
+; ============================================================================
+; Sun positioned for good caustic visibility
+(sun (azimuth 35) (elevation 55) (intensity 1.2) (color 1.0 0.98 0.92) (ambient 0.03))
+
+; Gray floor to see caustic patterns clearly
+(material gray-floor (type diffuse) (rgb 0.35 0.35 0.35))
 (floor (y 0) gray-floor)
 
 ; ============================================================================
-; Row 1: Colored glass spheres (Z = 8)
+; Row 1: Glass Cubes (z = 8) - varied colors
+; Height keeps them clear of floor
 ; ============================================================================
-(shape (sphere (at -8.75 2.0 8.0) (r 1.0)) glass-red)
-(shape (sphere (at -6.25 2.0 8.0) (r 1.0)) glass-orange)
-(shape (sphere (at -3.75 2.0 8.0) (r 1.0)) glass-yellow)
-(shape (sphere (at -1.25 2.0 8.0) (r 1.0)) glass-green)
-(shape (sphere (at  1.25 2.0 8.0) (r 1.0)) glass-cyan)
-(shape (sphere (at  3.75 2.0 8.0) (r 1.0)) glass-blue)
-(shape (sphere (at  6.25 2.0 8.0) (r 1.0)) glass-purple)
-(shape (sphere (at  8.75 2.0 8.0) (r 1.0)) glass-magenta)
+(shape (box (at -7 0.6 8) (half 0.5 0.5 0.5)) red-glass)
+(shape (box (at -5 0.5 8) (half 0.4 0.4 0.4)) green-glass)
+(shape (box (at -3 0.6 8) (half 0.5 0.5 0.5)) blue-glass)
+(shape (box (at -1 0.5 8) (half 0.4 0.4 0.4)) amber-glass)
+(shape (box (at  1 0.6 8) (half 0.5 0.5 0.5)) purple-glass)
+(shape (box (at  3 0.5 8) (half 0.4 0.4 0.4)) cyan-glass)
+(shape (box (at  5 0.7 8) (half 0.6 0.6 0.6)) diamond)
+(shape (box (at  7 0.5 8) (half 0.4 0.4 0.4)) crystal)
 
 ; ============================================================================
-; Row 2: Height variation (Z = 3) - caustic defocus demo
-; Heights: 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0
+; Row 2: Cones (z = 5) - various glass types
 ; ============================================================================
-(shape (sphere (at -8.75 1.5 3.0) (r 1.0)) glass-clear)
-(shape (sphere (at -6.25 2.0 3.0) (r 1.0)) glass-clear)
-(shape (sphere (at -3.75 2.5 3.0) (r 1.0)) glass-clear)
-(shape (sphere (at -1.25 3.0 3.0) (r 1.0)) glass-clear)
-(shape (sphere (at  1.25 3.5 3.0) (r 1.0)) glass-clear)
-(shape (sphere (at  3.75 4.0 3.0) (r 1.0)) glass-clear)
-(shape (sphere (at  6.25 4.5 3.0) (r 1.0)) glass-clear)
-(shape (sphere (at  8.75 5.0 3.0) (r 1.0)) glass-clear)
+(shape (cone (at -7 0.0 5) (r 0.5) (h 1.2)) red-glass)
+(shape (cone (at -5 0.0 5) (r 0.4) (h 1.0)) green-glass)
+(shape (cone (at -3 0.0 5) (r 0.5) (h 1.2)) blue-glass)
+(shape (cone (at -1 0.0 5) (r 0.4) (h 1.0)) amber-glass)
+(shape (cone (at  1 0.0 5) (r 0.5) (h 1.2)) diamond)
+(shape (cone (at  3 0.0 5) (r 0.4) (h 1.0)) water)
+(shape (cone (at  5 0.0 5) (r 0.5) (h 1.2)) crystal)
+(shape (cone (at  7 0.0 5) (r 0.4) (h 1.0)) magenta-glass)
 
 ; ============================================================================
-; Row 3: Roughness variation (Z = -2)
+; Row 3: Rods/Cylinders (z = 2) - vertical, create line caustics
 ; ============================================================================
-(shape (sphere (at -8.75 2.0 -2.0) (r 1.0)) glass-rough-0)
-(shape (sphere (at -6.25 2.0 -2.0) (r 1.0)) glass-rough-1)
-(shape (sphere (at -3.75 2.0 -2.0) (r 1.0)) glass-rough-2)
-(shape (sphere (at -1.25 2.0 -2.0) (r 1.0)) glass-rough-3)
-(shape (sphere (at  1.25 2.0 -2.0) (r 1.0)) glass-rough-4)
-(shape (sphere (at  3.75 2.0 -2.0) (r 1.0)) glass-rough-5)
-(shape (sphere (at  6.25 2.0 -2.0) (r 1.0)) glass-rough-6)
-(shape (sphere (at  8.75 2.0 -2.0) (r 1.0)) glass-rough-7)
+(shape (cylinder (at -7 0.0 2) (r 0.25) (h 1.4)) red-glass)
+(shape (cylinder (at -5 0.0 2) (r 0.2) (h 1.2)) green-glass)
+(shape (cylinder (at -3 0.0 2) (r 0.3) (h 1.6)) blue-glass)
+(shape (cylinder (at -1 0.0 2) (r 0.25) (h 1.4)) amber-glass)
+(shape (cylinder (at  1 0.0 2) (r 0.3) (h 1.8)) diamond)
+(shape (cylinder (at  3 0.0 2) (r 0.25) (h 1.4)) water)
+(shape (cylinder (at  5 0.0 2) (r 0.3) (h 1.6)) crystal)
+(shape (cylinder (at  7 0.0 2) (r 0.25) (h 1.4)) purple-glass)
 
 ; ============================================================================
-; Row 4: IOR variation (Z = -7)
-; IOR: 1.1 (air-like), 1.2, 1.3, 1.4, 1.5 (glass), 1.7, 2.0, 2.4 (diamond)
+; Row 4: Spheres (z = -1) - classic circular caustics
 ; ============================================================================
-(shape (sphere (at -8.75 2.0 -7.0) (r 1.0)) glass-ior-1)
-(shape (sphere (at -6.25 2.0 -7.0) (r 1.0)) glass-ior-2)
-(shape (sphere (at -3.75 2.0 -7.0) (r 1.0)) glass-ior-3)
-(shape (sphere (at -1.25 2.0 -7.0) (r 1.0)) glass-ior-4)
-(shape (sphere (at  1.25 2.0 -7.0) (r 1.0)) glass-ior-5)
-(shape (sphere (at  3.75 2.0 -7.0) (r 1.0)) glass-ior-6)
-(shape (sphere (at  6.25 2.0 -7.0) (r 1.0)) glass-ior-7)
-(shape (sphere (at  8.75 2.0 -7.0) (r 1.0)) glass-ior-8)
+(shape (sphere (at -7 0.8 -1) (r 0.7)) red-glass)
+(shape (sphere (at -5 0.6 -1) (r 0.5)) green-glass)
+(shape (sphere (at -3 0.8 -1) (r 0.7)) blue-glass)
+(shape (sphere (at -1 0.6 -1) (r 0.5)) amber-glass)
+(shape (sphere (at  1 1.0 -1) (r 0.9)) diamond)
+(shape (sphere (at  3 0.7 -1) (r 0.6)) water)
+(shape (sphere (at  5 0.8 -1) (r 0.7)) crystal)
+(shape (sphere (at  7 0.6 -1) (r 0.5)) cyan-glass)
+
+; ============================================================================
+; Row 5: Toruses (z = -4) - ring caustics
+; Flat orientation (rotated 90 on X to lie flat)
+; ============================================================================
+(shape (torus (at -7 0.4 -4) (R 0.5) (r 0.15) (rotate 90 0 0)) red-glass)
+(shape (torus (at -5 0.35 -4) (R 0.4) (r 0.12) (rotate 90 0 0)) green-glass)
+(shape (torus (at -3 0.45 -4) (R 0.55) (r 0.18) (rotate 90 0 0)) blue-glass)
+(shape (torus (at -1 0.35 -4) (R 0.4) (r 0.12) (rotate 90 0 0)) amber-glass)
+(shape (torus (at  1 0.5 -4) (R 0.6) (r 0.2) (rotate 90 0 0)) diamond)
+(shape (torus (at  3 0.4 -4) (R 0.5) (r 0.15) (rotate 90 0 0)) water)
+(shape (torus (at  5 0.45 -4) (R 0.55) (r 0.18) (rotate 90 0 0)) crystal)
+(shape (torus (at  7 0.35 -4) (R 0.4) (r 0.12) (rotate 90 0 0)) purple-glass)
+
+; ============================================================================
+; Row 6: Glass Teapots (z = -7) - complex curved caustics
+; Teapot needs rotate -90 for lid-up orientation
+; ============================================================================
+(instance teapot (at -7 0.0 -7) (scale 0.35) (rotate -90 0 0) red-glass)
+(instance teapot (at -5 0.0 -7) (scale 0.3) (rotate -90 30 0) green-glass)
+(instance teapot (at -3 0.0 -7) (scale 0.35) (rotate -90 60 0) blue-glass)
+(instance teapot (at -1 0.0 -7) (scale 0.3) (rotate -90 90 0) amber-glass)
+(instance teapot (at  1 0.0 -7) (scale 0.4) (rotate -90 120 0) diamond)
+(instance teapot (at  3 0.0 -7) (scale 0.35) (rotate -90 150 0) water)
+(instance teapot (at  5 0.0 -7) (scale 0.35) (rotate -90 180 0) crystal)
+(instance teapot (at  7 0.0 -7) (scale 0.3) (rotate -90 210 0) purple-glass)
+
+; ============================================================================
+; Center showcase: Large featured pieces (z = -10)
+; ============================================================================
+; Large clear glass sphere - classic circular caustic
+(shape (sphere (at -3 1.8 -10) (r 1.5)) clear-glass)
+
+; Large diamond cube - intense caustic from high IOR
+(shape (box (at  0 1.0 -10) (half 0.9 0.9 0.9)) diamond)
+
+; Large water torus - soft ring caustic
+(shape (torus (at  3 0.8 -10) (R 1.0) (r 0.35) (rotate 90 0 0)) water)
+
+; ============================================================================
+; Reference objects (non-glass) for visual comparison
+; ============================================================================
+(shape (sphere (at -9 0.4 2) (r 0.4)) white)
+(shape (sphere (at  9 0.4 2) (r 0.4)) white)
