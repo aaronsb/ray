@@ -1,7 +1,9 @@
-#version 450
+#version 460
+#extension GL_EXT_ray_query : require
 
 // Caustic Photon Mapping with Spatial Hashing
 // Traces photons from light through dielectrics, accumulates in hash grid using atomics
+// Uses VK_KHR_ray_query for hardware-accelerated BVH traversal
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
@@ -74,6 +76,9 @@ struct BezierInstance {
     uint materialId;
 };
 layout(std430, binding = 7) readonly buffer InstanceBuffer { BezierInstance instances[]; };
+
+// Hardware ray tracing acceleration structure (VK_KHR_ray_query)
+layout(binding = 8) uniform accelerationStructureEXT tlas;
 
 // Rotation utilities (shared with ray.comp)
 #include "includes/transforms.glsl"
@@ -560,58 +565,74 @@ bool hitInstanceSDF(uint instIdx, vec3 ro, vec3 rd,
     return true;
 }
 
-// Trace ray against opaque (non-dielectric) geometry
+// Trace ray against opaque (non-dielectric) geometry using hardware ray query
 // Returns hit position or vec3(-1000) sentinel if no hit
 vec3 traceToOpaqueGeometry(vec3 ro, vec3 rd, float maxDist) {
     float bestT = maxDist;
 
-    for (uint i = 0; i < pc.numPrimitives; i++) {
-        uint primMatId = primMaterialIds[i];
-        if (primMatId >= pc.numMaterials) continue;
-        // Skip refractive materials (IOR > 1.0) - we want opaque surfaces only
-        if (materials[primMatId].ior > 1.001) continue;
+    // Use hardware ray query for BVH traversal
+    rayQueryEXT rayQuery;
+    rayQueryInitializeEXT(rayQuery, tlas,
+        gl_RayFlagsNoneEXT,
+        0xFF,
+        ro,
+        0.001,
+        rd,
+        maxDist);
 
-        CSGPrimitive prim = primitives[i];
-        CSGTransform xform = transforms[i];
-        vec3 center = vec3(prim.x, prim.y, prim.z);
-        float scale = xform.scale;
+    while (rayQueryProceedEXT(rayQuery)) {
+        if (rayQueryGetIntersectionTypeEXT(rayQuery, false) == gl_RayQueryCandidateIntersectionAABBEXT) {
+            int i = rayQueryGetIntersectionPrimitiveIndexEXT(rayQuery, false);
+            if (i < 0 || i >= int(pc.numPrimitives)) continue;
 
-        float t = -1.0;
-        if (prim.type == PRIM_SPHERE) {
-            t = hitSphere(ro, rd, center, prim.param0 * scale);
-        } else if (prim.type == PRIM_BOX) {
-            vec3 half_ = vec3(prim.param0, prim.param1, prim.param2) * scale;
-            float tNear, tFar;
-            vec3 nNear, nFar;
-            if (hitBox(ro, rd, center, half_, tNear, tFar, nNear, nFar)) {
-                t = tNear;
-            }
-        } else if (prim.type == PRIM_CYLINDER) {
-            float tNear, tFar;
-            vec3 nNear, nFar;
-            if (hitCylinder(ro, rd, center, prim.param0 * scale, prim.param1 * scale, tNear, tFar, nNear, nFar)) {
-                t = tNear;
-            }
-        } else if (prim.type == PRIM_CONE) {
-            float tNear, tFar;
-            vec3 nNear, nFar;
-            if (hitCone(ro, rd, center, prim.param0 * scale, prim.param1 * scale, tNear, tFar, nNear, nFar)) {
-                t = tNear;
-            }
-        } else if (prim.type == PRIM_TORUS) {
-            float tNear, tFar;
-            vec3 nNear, nFar;
-            if (hitTorus(ro, rd, center, prim.param0 * scale, prim.param1 * scale, tNear, tFar, nNear, nFar)) {
-                t = tNear;
-            }
-        }
+            uint primMatId = primMaterialIds[i];
+            if (primMatId >= pc.numMaterials) continue;
+            // Skip refractive materials (IOR > 1.0) - we want opaque surfaces only
+            if (materials[primMatId].ior > 1.001) continue;
 
-        if (t > 0.001 && t < bestT) {
-            bestT = t;
+            CSGPrimitive prim = primitives[i];
+            CSGTransform xform = transforms[i];
+            vec3 center = vec3(prim.x, prim.y, prim.z);
+            float scale = xform.scale;
+
+            float t = -1.0;
+            if (prim.type == PRIM_SPHERE) {
+                t = hitSphere(ro, rd, center, prim.param0 * scale);
+            } else if (prim.type == PRIM_BOX) {
+                vec3 half_ = vec3(prim.param0, prim.param1, prim.param2) * scale;
+                float tNear, tFar;
+                vec3 nNear, nFar;
+                if (hitBox(ro, rd, center, half_, tNear, tFar, nNear, nFar)) {
+                    t = tNear;
+                }
+            } else if (prim.type == PRIM_CYLINDER) {
+                float tNear, tFar;
+                vec3 nNear, nFar;
+                if (hitCylinder(ro, rd, center, prim.param0 * scale, prim.param1 * scale, tNear, tFar, nNear, nFar)) {
+                    t = tNear;
+                }
+            } else if (prim.type == PRIM_CONE) {
+                float tNear, tFar;
+                vec3 nNear, nFar;
+                if (hitCone(ro, rd, center, prim.param0 * scale, prim.param1 * scale, tNear, tFar, nNear, nFar)) {
+                    t = tNear;
+                }
+            } else if (prim.type == PRIM_TORUS) {
+                float tNear, tFar;
+                vec3 nNear, nFar;
+                if (hitTorus(ro, rd, center, prim.param0 * scale, prim.param1 * scale, tNear, tFar, nNear, nFar)) {
+                    t = tNear;
+                }
+            }
+
+            if (t > 0.001 && t < bestT) {
+                bestT = t;
+                rayQueryGenerateIntersectionEXT(rayQuery, t);
+            }
         }
     }
 
-    // Also check floor if enabled
+    // Also check floor if enabled (not in acceleration structure)
     if (pc.floorY > -1000.0 && abs(rd.y) > 0.001) {
         float tFloor = (pc.floorY - ro.y) / rd.y;
         if (tFloor > 0.001 && tFloor < bestT) {
@@ -643,53 +664,73 @@ vec3 tracePhoton(vec3 ro, vec3 rd, out int hitPrimitive, out float pathLength, o
     int bestPrim = -1;
     int bestInstance = -1;  // -1 = CSG primitive, >= 0 = Bezier instance index
 
-    // Check CSG primitives for dielectrics (IOR > 1.0)
-    for (uint i = 0; i < pc.numPrimitives; i++) {
-        uint primMatId = primMaterialIds[i];
-        if (primMatId >= pc.numMaterials) continue;
-        // Dielectrics have real IOR > 1.0 (default is 1.0 = no refraction)
-        float ior = materials[primMatId].ior;
-        if (ior <= 1.001) continue;
+    // Use hardware ray query to find dielectric CSG primitives
+    // The TLAS contains AABBs for all primitives - we test actual shapes for AABB hits
+    rayQueryEXT rayQuery;
+    rayQueryInitializeEXT(rayQuery, tlas,
+        gl_RayFlagsNoneEXT,  // No special flags
+        0xFF,                // Cull mask (hit all)
+        ro,                  // Ray origin
+        0.001,               // t_min
+        rd,                  // Ray direction
+        1e10);               // t_max
 
-        CSGPrimitive prim = primitives[i];
-        CSGTransform xform = transforms[i];
-        vec3 center = vec3(prim.x, prim.y, prim.z);
-        float scale = xform.scale;
+    // Process AABB intersection candidates from hardware BVH
+    while (rayQueryProceedEXT(rayQuery)) {
+        // For AABB geometry, we get candidate intersections that need shape testing
+        if (rayQueryGetIntersectionTypeEXT(rayQuery, false) == gl_RayQueryCandidateIntersectionAABBEXT) {
+            int i = rayQueryGetIntersectionPrimitiveIndexEXT(rayQuery, false);
+            if (i < 0 || i >= int(pc.numPrimitives)) continue;
 
-        float t = -1.0;
-        if (prim.type == PRIM_SPHERE) {
-            t = hitSphere(ro, rd, center, prim.param0 * scale);
-        } else if (prim.type == PRIM_BOX) {
-            vec3 half_ = vec3(prim.param0, prim.param1, prim.param2) * scale;
-            float tNear, tFar;
-            vec3 nNear, nFar;
-            if (hitBox(ro, rd, center, half_, tNear, tFar, nNear, nFar)) {
-                t = tNear;
-            }
-        } else if (prim.type == PRIM_CYLINDER) {
-            float tNear, tFar;
-            vec3 nNear, nFar;
-            if (hitCylinder(ro, rd, center, prim.param0 * scale, prim.param1 * scale, tNear, tFar, nNear, nFar)) {
-                t = tNear;
-            }
-        } else if (prim.type == PRIM_CONE) {
-            float tNear, tFar;
-            vec3 nNear, nFar;
-            if (hitCone(ro, rd, center, prim.param0 * scale, prim.param1 * scale, tNear, tFar, nNear, nFar)) {
-                t = tNear;
-            }
-        } else if (prim.type == PRIM_TORUS) {
-            float tNear, tFar;
-            vec3 nNear, nFar;
-            if (hitTorus(ro, rd, center, prim.param0 * scale, prim.param1 * scale, tNear, tFar, nNear, nFar)) {
-                t = tNear;
-            }
-        }
+            uint primMatId = primMaterialIds[i];
+            if (primMatId >= pc.numMaterials) continue;
+            // Dielectrics have real IOR > 1.0 (default is 1.0 = no refraction)
+            float ior = materials[primMatId].ior;
+            if (ior <= 1.001) continue;
 
-        if (t > 0.0 && t < bestT) {
-            bestT = t;
-            bestPrim = int(i);
-            bestInstance = -1;  // CSG primitive
+            CSGPrimitive prim = primitives[i];
+            CSGTransform xform = transforms[i];
+            vec3 center = vec3(prim.x, prim.y, prim.z);
+            float scale = xform.scale;
+
+            float t = -1.0;
+            if (prim.type == PRIM_SPHERE) {
+                t = hitSphere(ro, rd, center, prim.param0 * scale);
+            } else if (prim.type == PRIM_BOX) {
+                vec3 half_ = vec3(prim.param0, prim.param1, prim.param2) * scale;
+                float tNear, tFar;
+                vec3 nNear, nFar;
+                if (hitBox(ro, rd, center, half_, tNear, tFar, nNear, nFar)) {
+                    t = tNear;
+                }
+            } else if (prim.type == PRIM_CYLINDER) {
+                float tNear, tFar;
+                vec3 nNear, nFar;
+                if (hitCylinder(ro, rd, center, prim.param0 * scale, prim.param1 * scale, tNear, tFar, nNear, nFar)) {
+                    t = tNear;
+                }
+            } else if (prim.type == PRIM_CONE) {
+                float tNear, tFar;
+                vec3 nNear, nFar;
+                if (hitCone(ro, rd, center, prim.param0 * scale, prim.param1 * scale, tNear, tFar, nNear, nFar)) {
+                    t = tNear;
+                }
+            } else if (prim.type == PRIM_TORUS) {
+                float tNear, tFar;
+                vec3 nNear, nFar;
+                if (hitTorus(ro, rd, center, prim.param0 * scale, prim.param1 * scale, tNear, tFar, nNear, nFar)) {
+                    t = tNear;
+                }
+            }
+
+            // If shape test passed and it's closer, confirm this intersection
+            if (t > 0.0 && t < bestT) {
+                bestT = t;
+                bestPrim = i;
+                bestInstance = -1;  // CSG primitive
+                // Generate intersection at this t value to update the committed hit
+                rayQueryGenerateIntersectionEXT(rayQuery, t);
+            }
         }
     }
 

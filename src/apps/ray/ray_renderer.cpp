@@ -300,6 +300,40 @@ void RayRenderer::releaseResources() {
         m_gaussianBufferMemory = VK_NULL_HANDLE;
     }
 
+    // Hardware ray tracing acceleration structures
+    if (m_tlas && m_vkDestroyAccelerationStructureKHR) {
+        m_vkDestroyAccelerationStructureKHR(dev, m_tlas, nullptr);
+        m_tlas = VK_NULL_HANDLE;
+    }
+    if (m_tlasBuffer) {
+        m_devFuncs->vkDestroyBuffer(dev, m_tlasBuffer, nullptr);
+        m_tlasBuffer = VK_NULL_HANDLE;
+    }
+    if (m_tlasBufferMemory) {
+        m_devFuncs->vkFreeMemory(dev, m_tlasBufferMemory, nullptr);
+        m_tlasBufferMemory = VK_NULL_HANDLE;
+    }
+    if (m_blas && m_vkDestroyAccelerationStructureKHR) {
+        m_vkDestroyAccelerationStructureKHR(dev, m_blas, nullptr);
+        m_blas = VK_NULL_HANDLE;
+    }
+    if (m_blasBuffer) {
+        m_devFuncs->vkDestroyBuffer(dev, m_blasBuffer, nullptr);
+        m_blasBuffer = VK_NULL_HANDLE;
+    }
+    if (m_blasBufferMemory) {
+        m_devFuncs->vkFreeMemory(dev, m_blasBufferMemory, nullptr);
+        m_blasBufferMemory = VK_NULL_HANDLE;
+    }
+    if (m_aabbBuffer) {
+        m_devFuncs->vkDestroyBuffer(dev, m_aabbBuffer, nullptr);
+        m_aabbBuffer = VK_NULL_HANDLE;
+    }
+    if (m_aabbBufferMemory) {
+        m_devFuncs->vkFreeMemory(dev, m_aabbBufferMemory, nullptr);
+        m_aabbBufferMemory = VK_NULL_HANDLE;
+    }
+
 #if FEATURE_GPU_CAUSTICS
     // Caustics pipeline resources
     if (m_causticsPipeline) {
@@ -903,10 +937,10 @@ void RayRenderer::createCausticsPipeline() {
                  m_causticHashBuffer, m_causticHashBufferMemory);
     printf("  Created caustic hash buffer: %u cells, RGB (%.1f KB)\n", CAUSTIC_HASH_CELLS, hashBufSize / 1024.0f);
 
-    // Create descriptor set layout for caustics (8 bindings)
+    // Create descriptor set layout for caustics (9 bindings)
     // 0: Primitives, 1: Transforms, 2: Materials, 3: CausticHash, 4: PrimToMaterial
-    // 5: Patches, 6: BVH, 7: Instances
-    std::array<VkDescriptorSetLayoutBinding, 8> bindings{};
+    // 5: Patches, 6: BVH, 7: Instances, 8: TLAS (acceleration structure)
+    std::array<VkDescriptorSetLayoutBinding, 9> bindings{};
 
     // Binding 0: CSG Primitives
     bindings[0].binding = 0;
@@ -956,6 +990,12 @@ void RayRenderer::createCausticsPipeline() {
     bindings[7].descriptorCount = 1;
     bindings[7].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
+    // Binding 8: TLAS (acceleration structure for hardware ray queries)
+    bindings[8].binding = 8;
+    bindings[8].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+    bindings[8].descriptorCount = 1;
+    bindings[8].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
@@ -966,10 +1006,12 @@ void RayRenderer::createCausticsPipeline() {
         return;
     }
 
-    // Create descriptor pool (8 storage buffers)
-    std::array<VkDescriptorPoolSize, 1> poolSizes{};
+    // Create descriptor pool (8 storage buffers + 1 acceleration structure)
+    std::array<VkDescriptorPoolSize, 2> poolSizes{};
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     poolSizes[0].descriptorCount = 8;
+    poolSizes[1].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+    poolSizes[1].descriptorCount = 1;
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -1066,7 +1108,13 @@ void RayRenderer::createCausticsPipeline() {
     instanceInfo.offset = 0;
     instanceInfo.range = VK_WHOLE_SIZE;
 
-    std::array<VkWriteDescriptorSet, 8> writes{};
+    // Acceleration structure write info
+    VkWriteDescriptorSetAccelerationStructureKHR asWriteInfo{};
+    asWriteInfo.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
+    asWriteInfo.accelerationStructureCount = 1;
+    asWriteInfo.pAccelerationStructures = &m_tlas;
+
+    std::array<VkWriteDescriptorSet, 9> writes{};
 
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[0].dstSet = m_causticsDescriptorSet;
@@ -1123,6 +1171,13 @@ void RayRenderer::createCausticsPipeline() {
     writes[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     writes[7].descriptorCount = 1;
     writes[7].pBufferInfo = &instanceInfo;
+
+    writes[8].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[8].dstSet = m_causticsDescriptorSet;
+    writes[8].dstBinding = 8;
+    writes[8].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+    writes[8].descriptorCount = 1;
+    writes[8].pNext = &asWriteInfo;  // AS uses pNext instead of pBufferInfo
 
     m_devFuncs->vkUpdateDescriptorSets(dev, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 
@@ -1558,7 +1613,129 @@ void RayRenderer::buildAccelerationStructures() {
     printf("  Built BLAS: %zu CSG primitives, %.1f KB\n",
            aabbs.size(), sizeInfo.accelerationStructureSize / 1024.0f);
 
-    // TODO: Build TLAS with single instance referencing BLAS
+    // Build TLAS with single instance referencing BLAS
+    // Get BLAS device address
+    VkAccelerationStructureDeviceAddressInfoKHR blasAddrInfo{};
+    blasAddrInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
+    blasAddrInfo.accelerationStructure = m_blas;
+    VkDeviceAddress blasAddress = m_vkGetAccelerationStructureDeviceAddressKHR(dev, &blasAddrInfo);
+
+    // Create instance (identity transform, all primitives in world space)
+    VkAccelerationStructureInstanceKHR instance{};
+    // Identity transform (3x4 row-major)
+    instance.transform.matrix[0][0] = 1.0f;
+    instance.transform.matrix[1][1] = 1.0f;
+    instance.transform.matrix[2][2] = 1.0f;
+    instance.instanceCustomIndex = 0;
+    instance.mask = 0xFF;
+    instance.instanceShaderBindingTableRecordOffset = 0;
+    instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+    instance.accelerationStructureReference = blasAddress;
+
+    // Create instance buffer
+    VkBuffer instanceBuffer;
+    VkDeviceMemory instanceBufferMemory;
+    VkDeviceSize instanceBufferSize = sizeof(VkAccelerationStructureInstanceKHR);
+    createBuffer(instanceBufferSize,
+        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        instanceBuffer, instanceBufferMemory);
+
+    // Upload instance
+    m_devFuncs->vkMapMemory(dev, instanceBufferMemory, 0, instanceBufferSize, 0, &data);
+    memcpy(data, &instance, instanceBufferSize);
+    m_devFuncs->vkUnmapMemory(dev, instanceBufferMemory);
+
+    // Get instance buffer device address
+    VkBufferDeviceAddressInfo instanceAddrInfo{};
+    instanceAddrInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+    instanceAddrInfo.buffer = instanceBuffer;
+    VkDeviceAddress instanceAddress = m_vkGetBufferDeviceAddressKHR(dev, &instanceAddrInfo);
+
+    // TLAS geometry description
+    VkAccelerationStructureGeometryKHR tlasGeometry{};
+    tlasGeometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+    tlasGeometry.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+    tlasGeometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+    tlasGeometry.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+    tlasGeometry.geometry.instances.arrayOfPointers = VK_FALSE;
+    tlasGeometry.geometry.instances.data.deviceAddress = instanceAddress;
+
+    // Get TLAS build sizes
+    VkAccelerationStructureBuildGeometryInfoKHR tlasBuildInfo{};
+    tlasBuildInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+    tlasBuildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    tlasBuildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    tlasBuildInfo.geometryCount = 1;
+    tlasBuildInfo.pGeometries = &tlasGeometry;
+
+    uint32_t instanceCount = 1;
+    VkAccelerationStructureBuildSizesInfoKHR tlasSizeInfo{};
+    tlasSizeInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+    m_vkGetAccelerationStructureBuildSizesKHR(dev, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+        &tlasBuildInfo, &instanceCount, &tlasSizeInfo);
+
+    // Create TLAS buffer
+    createBuffer(tlasSizeInfo.accelerationStructureSize,
+        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
+        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        m_tlasBuffer, m_tlasBufferMemory);
+
+    // Create TLAS
+    VkAccelerationStructureCreateInfoKHR tlasCreateInfo{};
+    tlasCreateInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+    tlasCreateInfo.buffer = m_tlasBuffer;
+    tlasCreateInfo.size = tlasSizeInfo.accelerationStructureSize;
+    tlasCreateInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    m_vkCreateAccelerationStructureKHR(dev, &tlasCreateInfo, nullptr, &m_tlas);
+
+    // Create scratch buffer for TLAS build
+    VkBuffer tlasScratchBuffer;
+    VkDeviceMemory tlasScratchMemory;
+    createBuffer(tlasSizeInfo.buildScratchSize,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        tlasScratchBuffer, tlasScratchMemory);
+
+    VkBufferDeviceAddressInfo tlasScratchAddrInfo{};
+    tlasScratchAddrInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+    tlasScratchAddrInfo.buffer = tlasScratchBuffer;
+    VkDeviceAddress tlasScratchAddress = m_vkGetBufferDeviceAddressKHR(dev, &tlasScratchAddrInfo);
+
+    // Build TLAS
+    tlasBuildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    tlasBuildInfo.dstAccelerationStructure = m_tlas;
+    tlasBuildInfo.scratchData.deviceAddress = tlasScratchAddress;
+
+    VkAccelerationStructureBuildRangeInfoKHR tlasRangeInfo{};
+    tlasRangeInfo.primitiveCount = instanceCount;
+    tlasRangeInfo.primitiveOffset = 0;
+    tlasRangeInfo.firstVertex = 0;
+    tlasRangeInfo.transformOffset = 0;
+    const VkAccelerationStructureBuildRangeInfoKHR* pTlasRangeInfo = &tlasRangeInfo;
+
+    // Execute TLAS build
+    m_devFuncs->vkAllocateCommandBuffers(dev, &allocInfo, &cmdBuf);
+    m_devFuncs->vkBeginCommandBuffer(cmdBuf, &beginInfo);
+    m_vkCmdBuildAccelerationStructuresKHR(cmdBuf, 1, &tlasBuildInfo, &pTlasRangeInfo);
+    m_devFuncs->vkEndCommandBuffer(cmdBuf);
+
+    m_devFuncs->vkCreateFence(dev, &fenceInfo, nullptr, &fence);
+    m_devFuncs->vkQueueSubmit(m_window->graphicsQueue(), 1, &submitInfo, fence);
+    m_devFuncs->vkWaitForFences(dev, 1, &fence, VK_TRUE, UINT64_MAX);
+
+    // Cleanup TLAS build resources
+    m_devFuncs->vkDestroyFence(dev, fence, nullptr);
+    m_devFuncs->vkFreeCommandBuffers(dev, m_window->graphicsCommandPool(), 1, &cmdBuf);
+    m_devFuncs->vkDestroyBuffer(dev, tlasScratchBuffer, nullptr);
+    m_devFuncs->vkFreeMemory(dev, tlasScratchMemory, nullptr);
+    m_devFuncs->vkDestroyBuffer(dev, instanceBuffer, nullptr);
+    m_devFuncs->vkFreeMemory(dev, instanceBufferMemory, nullptr);
+
+    printf("  Built TLAS: 1 instance, %.1f KB\n",
+           tlasSizeInfo.accelerationStructureSize / 1024.0f);
 }
 
 void RayRenderer::recordComputeCommands(VkCommandBuffer cmdBuf) {
