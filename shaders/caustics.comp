@@ -75,27 +75,8 @@ struct BezierInstance {
 };
 layout(std430, binding = 7) readonly buffer InstanceBuffer { BezierInstance instances[]; };
 
-// ============================================================================
-// Rotation utilities (must match ray.comp)
-// ============================================================================
-mat3 buildRotationMatrix(float rx, float ry, float rz) {
-    float cx = cos(rx), sx = sin(rx);
-    float cy = cos(ry), sy = sin(ry);
-    float cz = cos(rz), sz = sin(rz);
-    return mat3(
-        cy*cz, sx*sy*cz + cx*sz, -cx*sy*cz + sx*sz,
-        -cy*sz, -sx*sy*sz + cx*cz, cx*sy*sz + sx*cz,
-        sy, -sx*cy, cx*cy
-    );
-}
-
-vec3 rotateXYZ(vec3 p, vec3 angles) {
-    return buildRotationMatrix(angles.x, angles.y, angles.z) * p;
-}
-
-vec3 rotateXYZInverse(vec3 p, vec3 angles) {
-    return transpose(buildRotationMatrix(angles.x, angles.y, angles.z)) * p;
-}
+// Rotation utilities (shared with ray.comp)
+#include "includes/transforms.glsl"
 
 // 3D spatial hashing parameters - must match ray.comp exactly
 const float CAUSTIC_CELL_SIZE = 0.08;  // World units per cell (~8cm)

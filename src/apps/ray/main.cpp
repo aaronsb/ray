@@ -77,6 +77,14 @@ int main(int argc, char* argv[]) {
     RayWindow window;
     window.setVulkanInstance(&inst);
 
+    // Enable ray tracing extensions for hardware-accelerated BVH traversal
+    window.setDeviceExtensions({
+        "VK_KHR_acceleration_structure",
+        "VK_KHR_ray_query",
+        "VK_KHR_deferred_host_operations",  // Required by acceleration_structure
+        "VK_KHR_buffer_device_address"      // Required by acceleration_structure
+    });
+
     // Set scene file if specified
     if (parser.isSet(sceneOption)) {
         window.setScenePath(parser.value(sceneOption));

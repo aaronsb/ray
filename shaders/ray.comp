@@ -446,20 +446,7 @@ vec3 evaluatePointLights(vec3 hitPoint, vec3 normal, vec3 albedo);
 // Interval-based CSG (exact analytic edges)
 #if FEATURE_CSG
 #include "includes/csg.glsl"
-
-// Build rotation matrix from Euler angles (XYZ order)
-mat3 buildRotationMatrix(float rx, float ry, float rz) {
-    float cx = cos(rx), sx = sin(rx);
-    float cy = cos(ry), sy = sin(ry);
-    float cz = cos(rz), sz = sin(rz);
-
-    // Rotation order: Z * Y * X (applied to column vector)
-    return mat3(
-        cy*cz, sx*sy*cz + cx*sz, -cx*sy*cz + sx*sz,
-        -cy*sz, -sx*sy*sz + cx*cz, cx*sy*sz + sx*cz,
-        sy, -sx*cy, cx*cy
-    );
-}
+#include "includes/transforms.glsl"
 
 // Get interval for a CSG primitive by index
 Interval getPrimitiveInterval(vec3 ro, vec3 rd, uint primIndex) {
@@ -677,35 +664,6 @@ bool hitCSG(vec3 ro, vec3 rd, float tMin, float tMax, out float hitT, out vec3 h
     return hit;
 }
 #endif
-
-// ============================================================================
-// ROTATION FUNCTIONS (for instance transforms)
-// ============================================================================
-vec3 rotateX(vec3 v, float angle) {
-    float c = cos(angle);
-    float s = sin(angle);
-    return vec3(v.x, c * v.y - s * v.z, s * v.y + c * v.z);
-}
-
-vec3 rotateY(vec3 v, float angle) {
-    float c = cos(angle);
-    float s = sin(angle);
-    return vec3(c * v.x + s * v.z, v.y, -s * v.x + c * v.z);
-}
-
-vec3 rotateZ(vec3 v, float angle) {
-    float c = cos(angle);
-    float s = sin(angle);
-    return vec3(c * v.x - s * v.y, s * v.x + c * v.y, v.z);
-}
-
-vec3 rotateXYZ(vec3 v, vec3 angles) {
-    return rotateZ(rotateY(rotateX(v, angles.x), angles.y), angles.z);
-}
-
-vec3 rotateXYZInverse(vec3 v, vec3 angles) {
-    return rotateX(rotateY(rotateZ(v, -angles.z), -angles.y), -angles.x);
-}
 
 // ============================================================================
 // CAMERA
