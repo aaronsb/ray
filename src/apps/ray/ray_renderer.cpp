@@ -1305,7 +1305,7 @@ void RayRenderer::recordComputeCommands(VkCommandBuffer cmdBuf) {
     pc.bgB = m_background.b;
     pc.skyAmbient = m_lights.skyAmbient();
     pc.qualityLevel = m_qualityLevel;
-    pc.numGaussians = m_giGaussians.count();  // GI gaussians only (caustics use separate texture)
+    pc.numGaussians = m_giGaussians.count();  // GI gaussians only (caustics use separate buffer)
 
     m_devFuncs->vkCmdPushConstants(cmdBuf, m_pipelineLayout,
         VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RayPushConstants), &pc);
@@ -1470,10 +1470,8 @@ void RayRenderer::createGaussianBuffer() {
     VkDevice dev = m_window->device();
 
     const auto& gaussians = m_giGaussians.gaussians();
-    // Reserve space for CPU gaussians + GPU caustics (up to 65536 more)
-    constexpr size_t MAX_GPU_CAUSTICS = 65536;
-    size_t totalCapacity = gaussians.size() + MAX_GPU_CAUSTICS;
-    size_t bufSize = std::max(totalCapacity * sizeof(GIGaussian), size_t(48));
+    // GI Gaussians only - caustics use separate spatial hash buffer
+    size_t bufSize = std::max(gaussians.size() * sizeof(GIGaussian), size_t(48));
 
     createBuffer(bufSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
