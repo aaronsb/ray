@@ -72,6 +72,13 @@ public:
     // Clear all Gaussians
     void clear() { m_gaussians.clear(); }
 
+    // Truncate to max count (for GPU performance limits)
+    void truncate(uint32_t maxCount) {
+        if (m_gaussians.size() > maxCount) {
+            m_gaussians.resize(maxCount);
+        }
+    }
+
     // Accessors
     const std::vector<GIGaussian>& gaussians() const { return m_gaussians; }
     uint32_t count() const { return static_cast<uint32_t>(m_gaussians.size()); }

@@ -7,6 +7,7 @@
 #include "../types.h"
 #include <vector>
 #include <cstdint>
+#include <cmath>
 
 namespace parametric {
 
@@ -231,31 +232,55 @@ inline void CSGScene::setTransform(uint32_t primIndex, float rotX, float rotY, f
 
 inline AABB CSGScene::computePrimitiveAABB(uint32_t primIndex) const {
     const CSGPrimitive& p = m_primitives[primIndex];
-    Vec3 center(p.x, p.y, p.z);
+    const CSGTransform& xform = m_transforms[primIndex];
+    bool hasRotation = (xform.rotX != 0 || xform.rotY != 0 || xform.rotZ != 0);
+    float s = xform.scale;
 
     switch (static_cast<CSGPrimType>(p.type)) {
         case CSGPrimType::Sphere: {
-            float r = p.param0;
+            float r = p.param0 * s;
             return AABB(Vec3(p.x - r, p.y - r, p.z - r),
                        Vec3(p.x + r, p.y + r, p.z + r));
         }
         case CSGPrimType::Box: {
-            return AABB(Vec3(p.x - p.param0, p.y - p.param1, p.z - p.param2),
-                       Vec3(p.x + p.param0, p.y + p.param1, p.z + p.param2));
+            float hx = p.param0 * s, hy = p.param1 * s, hz = p.param2 * s;
+            if (hasRotation) {
+                // Conservative: use diagonal as spherical bound
+                float diag = std::sqrt(hx*hx + hy*hy + hz*hz);
+                return AABB(Vec3(p.x - diag, p.y - diag, p.z - diag),
+                           Vec3(p.x + diag, p.y + diag, p.z + diag));
+            }
+            return AABB(Vec3(p.x - hx, p.y - hy, p.z - hz),
+                       Vec3(p.x + hx, p.y + hy, p.z + hz));
         }
         case CSGPrimType::Cylinder: {
-            float r = p.param0, h = p.param1;
+            float r = p.param0 * s, h = p.param1 * s;
+            if (hasRotation) {
+                float diag = std::sqrt(r*r + h*h);
+                return AABB(Vec3(p.x - diag, p.y - diag, p.z - diag),
+                           Vec3(p.x + diag, p.y + diag, p.z + diag));
+            }
             return AABB(Vec3(p.x - r, p.y, p.z - r),
                        Vec3(p.x + r, p.y + h, p.z + r));
         }
         case CSGPrimType::Cone: {
-            float r = p.param0, h = p.param1;
+            float r = p.param0 * s, h = p.param1 * s;
+            if (hasRotation) {
+                float diag = std::sqrt(r*r + h*h);
+                return AABB(Vec3(p.x - diag, p.y - diag, p.z - diag),
+                           Vec3(p.x + diag, p.y + diag, p.z + diag));
+            }
             return AABB(Vec3(p.x - r, p.y, p.z - r),
                        Vec3(p.x + r, p.y + h, p.z + r));
         }
         case CSGPrimType::Torus: {
-            float R = p.param0, r = p.param1;
+            float R = p.param0 * s, r = p.param1 * s;
             float extent = R + r;
+            if (hasRotation) {
+                // Torus rotated: worst case is extent in all directions
+                return AABB(Vec3(p.x - extent, p.y - extent, p.z - extent),
+                           Vec3(p.x + extent, p.y + extent, p.z + extent));
+            }
             return AABB(Vec3(p.x - extent, p.y - r, p.z - extent),
                        Vec3(p.x + extent, p.y + r, p.z + extent));
         }

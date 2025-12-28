@@ -253,7 +253,8 @@ private:
     // Caustic hash buffer (spatial hashing with atomics)
     VkBuffer m_causticHashBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_causticHashBufferMemory = VK_NULL_HANDLE;
-    static constexpr uint32_t CAUSTIC_HASH_SIZE = 262144;  // Must match shader
+    static constexpr uint32_t CAUSTIC_GRID_CELLS = 262144;  // 512x512 grid, must match shader
+    static constexpr uint32_t CAUSTIC_HASH_SIZE = CAUSTIC_GRID_CELLS * 3;  // RGB (3 uints per cell)
     bool m_causticsNeedUpdate = true;
 
     // Frame tracking

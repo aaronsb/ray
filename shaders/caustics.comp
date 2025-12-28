@@ -44,7 +44,8 @@ struct Material {
 layout(std430, binding = 0) readonly buffer Primitives { CSGPrimitive primitives[]; };
 layout(std430, binding = 1) readonly buffer Transforms { CSGTransform transforms[]; };
 layout(std430, binding = 2) readonly buffer Materials { Material materials[]; };
-layout(std430, binding = 3) buffer CausticHashMap { uint causticCells[]; };  // Atomic accumulation
+// RGB caustic buffer - 3 uints per cell for atomic accumulation (R, G, B as fixed-point)
+layout(std430, binding = 3) buffer CausticHashMap { uint causticCells[]; };  // [cell*3 + 0]=R, [cell*3 + 1]=G, [cell*3 + 2]=B
 layout(std430, binding = 4) readonly buffer PrimToMaterial { uint primMaterialIds[]; };
 
 // 2D grid parameters - direct indexing, no hash collisions
@@ -121,9 +122,11 @@ vec3 boxExitNormal(vec3 pos, vec3 center, vec3 half_) {
 }
 
 // Trace ray through glass, return floor hit position (vec3(-1000) if no hit)
-// Also returns the primitive index that was hit via out parameter
-vec3 tracePhoton(vec3 ro, vec3 rd, out int hitPrimitive) {
+// Also returns: primitive index, path length through glass, material ID
+vec3 tracePhoton(vec3 ro, vec3 rd, out int hitPrimitive, out float pathLength, out uint matId) {
     hitPrimitive = -1;
+    pathLength = 0.0;
+    matId = 0;
     // Find closest glass primitive
     float bestT = 1e10;
     int bestPrim = -1;
@@ -159,6 +162,7 @@ vec3 tracePhoton(vec3 ro, vec3 rd, out int hitPrimitive) {
     if (bestPrim < 0) return vec3(-1000.0);  // Sentinel for "no hit"
 
     hitPrimitive = bestPrim;  // Return which primitive was hit
+    matId = primMaterialIds[bestPrim];  // Return material ID for Beer's law
 
     // Trace through glass
     CSGPrimitive prim = primitives[bestPrim];
@@ -166,7 +170,6 @@ vec3 tracePhoton(vec3 ro, vec3 rd, out int hitPrimitive) {
     vec3 center = vec3(prim.x, prim.y, prim.z);
     float scale = xform.scale;
 
-    uint matId = primMaterialIds[bestPrim];
     float ior = materials[matId].ior > 1.0 ? materials[matId].ior : 1.5;
 
     vec3 hitEntry = ro + rd * bestT;
@@ -204,6 +207,9 @@ vec3 tracePhoton(vec3 ro, vec3 rd, out int hitPrimitive) {
         hitExit = hitEntry + refracted * (tF2 + 0.01);
         normalExit = boxExitNormal(hitExit, center, half_);
     }
+
+    // Calculate path length through glass for Beer's law
+    pathLength = length(hitExit - hitEntry);
 
     // Refract out
     vec3 exitDir = refractRay(refracted, -normalExit, ior);
@@ -286,7 +292,9 @@ void main() {
 
     // Trace center ray (returns vec3(-1000) for no hit)
     int primCenter, primRight, primUp;
-    vec3 hitCenter = tracePhoton(ro, rd, primCenter);
+    float pathCenter, pathRight, pathUp;
+    uint matCenter, matRight, matUp;
+    vec3 hitCenter = tracePhoton(ro, rd, primCenter, pathCenter, matCenter);
     if (hitCenter.x < -100.0) return;  // Check for sentinel, not negative coords
 
     // Check if hit is within our map bounds (fixed bounds matching ray.comp)
@@ -309,8 +317,8 @@ void main() {
         rdUp = normalize(lightDir + right * u * angle + forward * (v + du) * angle);
     }
 
-    vec3 hitRight = tracePhoton(roRight, rdRight, primRight);
-    vec3 hitUp = tracePhoton(roUp, rdUp, primUp);
+    vec3 hitRight = tracePhoton(roRight, rdRight, primRight, pathRight, matRight);
+    vec3 hitUp = tracePhoton(roUp, rdUp, primUp, pathUp, matUp);
 
     // Require all 3 rays to trace through glass (can be different primitives)
     if (hitRight.x < -100.0 || hitUp.x < -100.0) {
@@ -349,14 +357,30 @@ void main() {
         intensity /= (1.0 + dist * dist * 0.01);
     }
 
-    // Compute intensity contribution (scale for fixed-point storage)
-    // Scale up for accumulation, will be normalized when reading
-    float contribution = intensity * pc.lightIntensity * 1000.0;
-    uint fixedContrib = uint(clamp(contribution, 0.0, 1000000.0));
+    // Apply Beer's law for colored glass absorption
+    // absorption = -log(color) gives us absorption coefficient from transmission color
+    // transmitted = exp(-absorption * distance)
+    Material mat = materials[matCenter];
+    vec3 glassColor = vec3(mat.r, mat.g, mat.b);
 
-    if (fixedContrib == 0) return;
+    // Convert color to absorption (avoid log(0) with small epsilon)
+    // Higher color value = less absorption = more transmission
+    vec3 absorption = -log(max(glassColor, vec3(0.01)));
 
-    // Atomic accumulate to 2D grid cell (direct index, no collisions)
+    // Apply Beer's law: transmission decreases exponentially with path length
+    // Scale path length for reasonable absorption (typical sphere diameter ~2)
+    float absorptionScale = 0.5;  // Tunable: higher = more color saturation
+    vec3 transmission = exp(-absorption * pathCenter * absorptionScale);
+
+    // Compute RGB contribution (scale for fixed-point storage)
+    vec3 rgbContribution = transmission * intensity * pc.lightIntensity * 1000.0;
+    uvec3 fixedRGB = uvec3(clamp(rgbContribution, vec3(0.0), vec3(1000000.0)));
+
+    if (fixedRGB.r == 0u && fixedRGB.g == 0u && fixedRGB.b == 0u) return;
+
+    // Atomic accumulate RGB to 2D grid cell (3 uints per cell)
     uint cellIndex = causticIndex2D(hitCenter);
-    atomicAdd(causticCells[cellIndex], fixedContrib);
+    atomicAdd(causticCells[cellIndex * 3u + 0u], fixedRGB.r);
+    atomicAdd(causticCells[cellIndex * 3u + 1u], fixedRGB.g);
+    atomicAdd(causticCells[cellIndex * 3u + 2u], fixedRGB.b);
 }

@@ -884,7 +884,7 @@ void RayRenderer::createCausticsPipeline() {
     createBuffer(hashBufSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                  m_causticHashBuffer, m_causticHashBufferMemory);
-    printf("  Created caustic hash buffer: %u cells (%.1f KB)\n", CAUSTIC_HASH_SIZE, hashBufSize / 1024.0f);
+    printf("  Created caustic hash buffer: %u cells, RGB (%.1f KB)\n", CAUSTIC_GRID_CELLS, hashBufSize / 1024.0f);
 
     // Create descriptor set layout for caustics (5 bindings)
     // 0: Primitives, 1: Transforms, 2: Materials, 3: CausticHash (buffer), 4: PrimToMaterial
@@ -1250,7 +1250,7 @@ void RayRenderer::runCausticsPass() {
     m_devFuncs->vkDestroyFence(dev, fence, nullptr);
     m_devFuncs->vkFreeCommandBuffers(dev, m_window->graphicsCommandPool(), 1, &cmdBuf);
 
-    printf("  Caustics pass complete (%ux%u photons -> %u cell hash)\n", pc.gridWidth, pc.gridHeight, CAUSTIC_HASH_SIZE);
+    printf("  Caustics pass complete (%ux%u photons -> %u cell RGB hash)\n", pc.gridWidth, pc.gridHeight, CAUSTIC_GRID_CELLS);
     m_causticsNeedUpdate = false;
 }
 #endif // FEATURE_GPU_CAUSTICS
