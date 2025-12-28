@@ -886,9 +886,10 @@ void RayRenderer::createCausticsPipeline() {
                  m_causticHashBuffer, m_causticHashBufferMemory);
     printf("  Created caustic hash buffer: %u cells, RGB (%.1f KB)\n", CAUSTIC_GRID_CELLS, hashBufSize / 1024.0f);
 
-    // Create descriptor set layout for caustics (5 bindings)
+    // Create descriptor set layout for caustics (9 bindings)
     // 0: Primitives, 1: Transforms, 2: Materials, 3: CausticHash (buffer), 4: PrimToMaterial
-    std::array<VkDescriptorSetLayoutBinding, 5> bindings{};
+    // 5: Patches, 6: BVH, 7: PatchIndices, 8: Instances
+    std::array<VkDescriptorSetLayoutBinding, 9> bindings{};
 
     // Binding 0: Primitives
     bindings[0].binding = 0;
@@ -920,6 +921,30 @@ void RayRenderer::createCausticsPipeline() {
     bindings[4].descriptorCount = 1;
     bindings[4].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
+    // Binding 5: Patches
+    bindings[5].binding = 5;
+    bindings[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[5].descriptorCount = 1;
+    bindings[5].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    // Binding 6: BVH
+    bindings[6].binding = 6;
+    bindings[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[6].descriptorCount = 1;
+    bindings[6].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    // Binding 7: Patch indices
+    bindings[7].binding = 7;
+    bindings[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[7].descriptorCount = 1;
+    bindings[7].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    // Binding 8: Instances
+    bindings[8].binding = 8;
+    bindings[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[8].descriptorCount = 1;
+    bindings[8].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
@@ -930,10 +955,10 @@ void RayRenderer::createCausticsPipeline() {
         return;
     }
 
-    // Create descriptor pool (5 storage buffers)
+    // Create descriptor pool (9 storage buffers)
     std::array<VkDescriptorPoolSize, 1> poolSizes{};
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    poolSizes[0].descriptorCount = 5;
+    poolSizes[0].descriptorCount = 9;
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;

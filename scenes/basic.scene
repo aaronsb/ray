@@ -17,6 +17,8 @@
 (material ground  (type checker) (rgb 0.9 0.9 0.9) (color2 0.1 0.1 0.1) (scale 2.0))
 (material copper  (type metal) (rgb 0.72 0.45 0.20) (roughness 0.08) (metallic 0.5))
 (material chrome  (type metal) (rgb 0.95 0.95 0.97) (roughness 0.02))
+(material mirror  (type metal) (rgb 0.98 0.98 0.98) (roughness 0.0))
+(material glass   (type glass) (rgb 0.98 0.98 1.0) (ior 1.5))
 (material brass   (type metal) (rgb 0.80 0.58 0.21) (roughness 0.05))
 (material blue    (type metal) (rgb 0.3 0.5 0.9) (roughness 0.1))
 (material jade    (type diffuse) (rgb 0.4 0.7 0.5))
@@ -41,6 +43,12 @@
 
 ; Cone (far right)
 (shape (cone (at 7 0 0) (r 1.0) (h 2.2)) copper)
+
+; Mirror cube (far left) - perfectly smooth metal
+(shape (box (at -7 0.75 0) (half 0.75 0.75 0.75)) mirror)
+
+; Glass cube (next to mirror) - for debugging ring artifacts
+(shape (box (at -7 0.75 2) (half 0.75 0.75 0.75)) glass)
 
 ; ============================================================================
 ; Utah Teapot (lid up, centered, on a small pedestal)

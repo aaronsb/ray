@@ -1179,6 +1179,11 @@ void main() {
                 // Glass material - refraction with IOR from material
                 float cosTheta = dot(-ray.direction, normal);
                 bool entering = cosTheta > 0.0;
+
+                // DEBUG: Visualize entering (green) vs exiting (red)
+                // From inside cube, should be ALL red (exiting)
+                // color = entering ? vec3(0,1,0) : vec3(1,0,0); terminated = true; break;
+
                 vec3 n = entering ? normal : -normal;
                 float eta = entering ? (1.0 / mat.ior) : mat.ior;
 

@@ -68,6 +68,9 @@ uint causticIndex2D(vec3 pos) {
 const uint MAT_GLASS = 2;
 const uint PRIM_SPHERE = 0;
 const uint PRIM_BOX = 1;
+const uint PRIM_CYLINDER = 2;
+const uint PRIM_CONE = 3;
+const uint PRIM_TORUS = 4;
 
 const uint LIGHT_DIRECTIONAL = 0;
 const uint LIGHT_POINT = 1;
@@ -98,8 +101,16 @@ float hitSphereFar(vec3 ro, vec3 rd, vec3 center, float radius) {
     return -b + sqrt(h);
 }
 
-bool hitBox(vec3 ro, vec3 rd, vec3 center, vec3 half_, out float tNear, out float tFar, out vec3 normal) {
-    vec3 invRd = 1.0 / rd;
+bool hitBox(vec3 ro, vec3 rd, vec3 center, vec3 half_,
+            out float tNear, out float tFar, out vec3 normalNear, out vec3 normalFar) {
+    // Protect against degenerate rays (e.g., looking straight down Y axis)
+    vec3 safeRd = rd;
+    float minComp = 1e-6;
+    if (abs(safeRd.x) < minComp) safeRd.x = sign(safeRd.x + minComp) * minComp;
+    if (abs(safeRd.y) < minComp) safeRd.y = sign(safeRd.y + minComp) * minComp;
+    if (abs(safeRd.z) < minComp) safeRd.z = sign(safeRd.z + minComp) * minComp;
+
+    vec3 invRd = 1.0 / safeRd;
     vec3 t1 = (center - half_ - ro) * invRd;
     vec3 t2 = (center + half_ - ro) * invRd;
     vec3 tMin = min(t1, t2);
@@ -107,18 +118,271 @@ bool hitBox(vec3 ro, vec3 rd, vec3 center, vec3 half_, out float tNear, out floa
     tNear = max(max(tMin.x, tMin.y), tMin.z);
     tFar = min(min(tMax.x, tMax.y), tMax.z);
     if (tNear > tFar || tFar < 0.0) return false;
-    if (tNear == tMin.x) normal = vec3(-sign(rd.x), 0, 0);
-    else if (tNear == tMin.y) normal = vec3(0, -sign(rd.y), 0);
-    else normal = vec3(0, 0, -sign(rd.z));
+
+    // Entry normal - position-based (which face is the point on?)
+    vec3 pNear = ro + tNear * safeRd;
+    vec3 localNear = pNear - center;
+    vec3 scaledNear = abs(localNear) / half_;
+    if (scaledNear.x >= scaledNear.y && scaledNear.x >= scaledNear.z) {
+        normalNear = vec3(sign(localNear.x), 0, 0);
+    } else if (scaledNear.y >= scaledNear.z) {
+        normalNear = vec3(0, sign(localNear.y), 0);
+    } else {
+        normalNear = vec3(0, 0, sign(localNear.z));
+    }
+
+    // Exit normal - position-based
+    vec3 pFar = ro + tFar * safeRd;
+    vec3 localFar = pFar - center;
+    vec3 scaledFar = abs(localFar) / half_;
+    if (scaledFar.x >= scaledFar.y && scaledFar.x >= scaledFar.z) {
+        normalFar = vec3(sign(localFar.x), 0, 0);
+    } else if (scaledFar.y >= scaledFar.z) {
+        normalFar = vec3(0, sign(localFar.y), 0);
+    } else {
+        normalFar = vec3(0, 0, sign(localFar.z));
+    }
+
     return true;
 }
 
-vec3 boxExitNormal(vec3 pos, vec3 center, vec3 half_) {
-    vec3 local = pos - center;
-    vec3 d = abs(local) - half_;
-    if (d.x > d.y && d.x > d.z) return vec3(sign(local.x), 0, 0);
-    if (d.y > d.z) return vec3(0, sign(local.y), 0);
-    return vec3(0, 0, sign(local.z));
+// Cylinder intersection (Y-axis aligned, base at center)
+bool hitCylinder(vec3 ro, vec3 rd, vec3 center, float radius, float height,
+                 out float tNear, out float tFar, out vec3 normalNear, out vec3 normalFar) {
+    vec3 oc = ro - center;
+
+    // Infinite cylinder (XZ plane)
+    float a = rd.x * rd.x + rd.z * rd.z;
+    float b = 2.0 * (oc.x * rd.x + oc.z * rd.z);
+    float c = oc.x * oc.x + oc.z * oc.z - radius * radius;
+
+    float disc = b * b - 4.0 * a * c;
+    if (disc < 0.0) return false;
+
+    float t1, t2;
+    if (abs(a) < 1e-6) {
+        if (c > 0.0) return false;
+        t1 = -1e30;
+        t2 = 1e30;
+    } else {
+        float sqrtDisc = sqrt(disc);
+        t1 = (-b - sqrtDisc) / (2.0 * a);
+        t2 = (-b + sqrtDisc) / (2.0 * a);
+    }
+
+    float tCap0, tCap1;
+    if (abs(rd.y) < 1e-6) {
+        if (oc.y < 0.0 || oc.y > height) return false;
+        tCap0 = -1e30;
+        tCap1 = 1e30;
+    } else {
+        tCap0 = (0.0 - oc.y) / rd.y;
+        tCap1 = (height - oc.y) / rd.y;
+    }
+    if (tCap0 > tCap1) { float tmp = tCap0; tCap0 = tCap1; tCap1 = tmp; }
+
+    tNear = max(t1, tCap0);
+    tFar = min(t2, tCap1);
+    if (tNear > tFar || tFar < 0.0) return false;
+
+    // Compute normals
+    vec3 pNear = ro + tNear * rd;
+    if (abs(pNear.y - center.y) < 0.001) normalNear = vec3(0, -1, 0);
+    else if (abs(pNear.y - center.y - height) < 0.001) normalNear = vec3(0, 1, 0);
+    else normalNear = normalize(vec3(pNear.x - center.x, 0, pNear.z - center.z));
+
+    vec3 pFar = ro + tFar * rd;
+    if (abs(pFar.y - center.y) < 0.001) normalFar = vec3(0, -1, 0);
+    else if (abs(pFar.y - center.y - height) < 0.001) normalFar = vec3(0, 1, 0);
+    else normalFar = normalize(vec3(pFar.x - center.x, 0, pFar.z - center.z));
+
+    return true;
+}
+
+// Cone intersection (Y-axis, apex at center.y + height)
+bool hitCone(vec3 ro, vec3 rd, vec3 center, float radius, float height,
+             out float tNear, out float tFar, out vec3 normalNear, out vec3 normalFar) {
+    vec3 oc = ro - center;
+    float k = radius / height;
+    float k2 = k * k;
+
+    float a = rd.x * rd.x + rd.z * rd.z - k2 * rd.y * rd.y;
+    float b = 2.0 * (oc.x * rd.x + oc.z * rd.z + k2 * (height - oc.y) * rd.y);
+    float c = oc.x * oc.x + oc.z * oc.z - k2 * (height - oc.y) * (height - oc.y);
+
+    float disc = b * b - 4.0 * a * c;
+
+    float tCone1 = 1e30, tCone2 = 1e30, tBase = 1e30;
+
+    // Base cap
+    if (abs(rd.y) > 1e-6) {
+        float t = -oc.y / rd.y;
+        if (t > 1e-6) {
+            vec3 p = oc + t * rd;
+            if (p.x*p.x + p.z*p.z <= radius*radius) tBase = t;
+        }
+    }
+
+    // Cone surface
+    if (disc >= 0.0 && abs(a) > 1e-6) {
+        float sqrtDisc = sqrt(disc);
+        float t1 = (-b - sqrtDisc) / (2.0 * a);
+        float t2 = (-b + sqrtDisc) / (2.0 * a);
+
+        for (int i = 0; i < 2; i++) {
+            float t = (i == 0) ? t1 : t2;
+            if (t > 1e-6) {
+                vec3 p = oc + t * rd;
+                if (p.y >= -0.01 && p.y <= height + 0.01) {
+                    float r = length(vec2(p.x, p.z));
+                    float expectedR = k * (height - p.y);
+                    if (abs(r - expectedR) < 0.1) {
+                        if (tCone1 > 1e20) tCone1 = t;
+                        else tCone2 = t;
+                    }
+                }
+            }
+        }
+    }
+    if (tCone1 > tCone2) { float tmp = tCone1; tCone1 = tCone2; tCone2 = tmp; }
+
+    // Combine hits
+    int enterType = -1, exitType = -1;
+    tNear = 1e30; tFar = -1e30;
+
+    if (tCone1 < 1e20 && tCone2 < 1e20) {
+        tNear = tCone1; tFar = tCone2;
+        enterType = 0; exitType = 0;
+    } else if (tCone1 < 1e20 && tBase < 1e20) {
+        if (tCone1 < tBase) { tNear = tCone1; tFar = tBase; enterType = 0; exitType = 1; }
+        else { tNear = tBase; tFar = tCone1; enterType = 1; exitType = 0; }
+    } else {
+        return false;
+    }
+
+    if (tNear >= tFar || tFar < 0.0) return false;
+
+    // Normals
+    float cosAngle = height / sqrt(height * height + radius * radius);
+    float sinAngle = radius / sqrt(height * height + radius * radius);
+
+    vec3 pNear = oc + tNear * rd;
+    vec3 pFar = oc + tFar * rd;
+
+    if (enterType == 1) normalNear = vec3(0, -1, 0);
+    else {
+        float radLen = length(vec2(pNear.x, pNear.z));
+        if (radLen < 1e-6) normalNear = vec3(0, 1, 0);
+        else {
+            vec2 radDir = vec2(pNear.x, pNear.z) / radLen;
+            normalNear = normalize(vec3(radDir.x * cosAngle, sinAngle, radDir.y * cosAngle));
+        }
+    }
+
+    if (exitType == 1) normalFar = vec3(0, -1, 0);
+    else {
+        float radLen = length(vec2(pFar.x, pFar.z));
+        if (radLen < 1e-6) normalFar = vec3(0, 1, 0);
+        else {
+            vec2 radDir = vec2(pFar.x, pFar.z) / radLen;
+            normalFar = normalize(vec3(radDir.x * cosAngle, sinAngle, radDir.y * cosAngle));
+        }
+    }
+
+    return true;
+}
+
+// Torus SDF
+float torusSDF(vec3 p, float R, float r) {
+    vec2 q = vec2(length(p.xz) - R, p.y);
+    return length(q) - r;
+}
+
+// Torus intersection using sphere tracing
+bool hitTorus(vec3 ro, vec3 rd, vec3 center, float majorR, float minorR,
+              out float tNear, out float tFar, out vec3 normalNear, out vec3 normalFar) {
+    vec3 O = ro - center;
+
+    // Bounding sphere check
+    float boundR = majorR + minorR;
+    float aDot = dot(rd, rd);
+    float bDot = 2.0 * dot(O, rd);
+    float cDot = dot(O, O) - boundR * boundR;
+    float disc = bDot * bDot - 4.0 * aDot * cDot;
+    if (disc < 0.0) return false;
+
+    float sqrtDisc = sqrt(disc);
+    float t0 = (-bDot - sqrtDisc) / (2.0 * aDot);
+    float t1 = (-bDot + sqrtDisc) / (2.0 * aDot);
+    if (t1 < 0.001) return false;
+
+    float tStart = max(t0, 0.001);
+    float tEnd = t1;
+
+    // Sphere trace to find entry
+    tNear = -1.0;
+    float t = tStart;
+    for (int i = 0; i < 64; i++) {
+        vec3 p = O + t * rd;
+        float d = torusSDF(p, majorR, minorR);
+        if (d < 0.0001) { tNear = t; break; }
+        t += d;
+        if (t > tEnd) break;
+    }
+    if (tNear < 0.0) return false;
+
+    // Sphere trace backwards for exit
+    tFar = -1.0;
+    t = tEnd;
+    for (int i = 0; i < 64; i++) {
+        vec3 p = O + t * rd;
+        float d = torusSDF(p, majorR, minorR);
+        if (d < 0.0001) { tFar = t; break; }
+        t -= d;
+        if (t <= tNear + 0.001) break;
+    }
+
+    // Forward march fallback
+    if (tFar < 0.0 || tFar <= tNear) {
+        t = tNear + 0.0001;
+        for (int i = 0; i < 128; i++) {
+            vec3 p = O + t * rd;
+            float d = torusSDF(p, majorR, minorR);
+            if (d > 0.0) {
+                float lo = tNear, hi = t;
+                for (int j = 0; j < 16; j++) {
+                    float mid = 0.5 * (lo + hi);
+                    if (torusSDF(O + mid * rd, majorR, minorR) < 0.0) lo = mid;
+                    else hi = mid;
+                }
+                tFar = 0.5 * (lo + hi);
+                break;
+            }
+            t += max(-d, 0.0001);
+            if (t > tEnd) break;
+        }
+    }
+    if (tFar < 0.0 || tFar <= tNear) return false;
+
+    // Compute normals
+    vec3 pNear = O + tNear * rd;
+    vec3 pFar = O + tFar * rd;
+
+    float sqrtXZ1 = sqrt(pNear.x * pNear.x + pNear.z * pNear.z + 1e-8);
+    normalNear = normalize(vec3(
+        (sqrtXZ1 - majorR) * pNear.x / sqrtXZ1,
+        pNear.y,
+        (sqrtXZ1 - majorR) * pNear.z / sqrtXZ1
+    ));
+
+    float sqrtXZ2 = sqrt(pFar.x * pFar.x + pFar.z * pFar.z + 1e-8);
+    normalFar = normalize(vec3(
+        (sqrtXZ2 - majorR) * pFar.x / sqrtXZ2,
+        pFar.y,
+        (sqrtXZ2 - majorR) * pFar.z / sqrtXZ2
+    ));
+
+    return true;
 }
 
 // Trace ray through glass, return floor hit position (vec3(-1000) if no hit)
@@ -147,8 +411,26 @@ vec3 tracePhoton(vec3 ro, vec3 rd, out int hitPrimitive, out float pathLength, o
         } else if (prim.type == PRIM_BOX) {
             vec3 half_ = vec3(prim.param0, prim.param1, prim.param2) * scale;
             float tNear, tFar;
-            vec3 n;
-            if (hitBox(ro, rd, center, half_, tNear, tFar, n)) {
+            vec3 nNear, nFar;
+            if (hitBox(ro, rd, center, half_, tNear, tFar, nNear, nFar)) {
+                t = tNear;
+            }
+        } else if (prim.type == PRIM_CYLINDER) {
+            float tNear, tFar;
+            vec3 nNear, nFar;
+            if (hitCylinder(ro, rd, center, prim.param0 * scale, prim.param1 * scale, tNear, tFar, nNear, nFar)) {
+                t = tNear;
+            }
+        } else if (prim.type == PRIM_CONE) {
+            float tNear, tFar;
+            vec3 nNear, nFar;
+            if (hitCone(ro, rd, center, prim.param0 * scale, prim.param1 * scale, tNear, tFar, nNear, nFar)) {
+                t = tNear;
+            }
+        } else if (prim.type == PRIM_TORUS) {
+            float tNear, tFar;
+            vec3 nNear, nFar;
+            if (hitTorus(ro, rd, center, prim.param0 * scale, prim.param1 * scale, tNear, tFar, nNear, nFar)) {
                 t = tNear;
             }
         }
@@ -188,24 +470,103 @@ vec3 tracePhoton(vec3 ro, vec3 rd, out int hitPrimitive, out float pathLength, o
 
         hitExit = hitEntry + refracted * (tExit + 0.001);
         normalExit = normalize(hitExit - center);
-    } else {
+    } else if (prim.type == PRIM_BOX) {
         vec3 half_ = vec3(prim.param0, prim.param1, prim.param2) * scale;
         float tNear, tFar;
-        vec3 n;
-        hitBox(ro, rd, center, half_, tNear, tFar, n);
-        normalEntry = n;
+        vec3 nNear, nFar;
+        hitBox(ro, rd, center, half_, tNear, tFar, nNear, nFar);
+        normalEntry = nNear;
+
+        refracted = refractRay(rd, normalEntry, 1.0 / ior);
+        if (length(refracted) < 0.5) return vec3(-1000.0);
+
+        // For box: compute exit directly using the original ray's tFar
+        // This avoids the second hitBox call which can cause multi-bounce artifacts
+        hitExit = ro + rd * tFar;  // Exit point from original entry ray
+
+        // But we need the exit point for the REFRACTED ray, not the original
+        // Use slab intersection directly for the refracted ray
+        vec3 invRef = 1.0 / (refracted + vec3(1e-8));  // Avoid division by zero
+        vec3 t1 = (center - half_ - hitEntry) * invRef;
+        vec3 t2 = (center + half_ - hitEntry) * invRef;
+        vec3 tMax = max(t1, t2);
+        float tExit = min(min(tMax.x, tMax.y), tMax.z);
+
+        if (tExit < 0.001) return vec3(-1000.0);  // No valid exit
+
+        hitExit = hitEntry + refracted * tExit;
+
+        // Exit normal from position
+        vec3 local = hitExit - center;
+        vec3 normHalf = abs(local) / half_;
+        if (normHalf.x >= normHalf.y && normHalf.x >= normHalf.z) {
+            normalExit = vec3(sign(local.x), 0.0, 0.0);
+        } else if (normHalf.y >= normHalf.z) {
+            normalExit = vec3(0.0, sign(local.y), 0.0);
+        } else {
+            normalExit = vec3(0.0, 0.0, sign(local.z));
+        }
+
+        hitExit = hitExit + normalExit * 0.001;  // Push slightly outside
+    } else if (prim.type == PRIM_CYLINDER) {
+        float radius = prim.param0 * scale;
+        float height = prim.param1 * scale;
+        float tNear, tFar;
+        vec3 nNear, nFar;
+        hitCylinder(ro, rd, center, radius, height, tNear, tFar, nNear, nFar);
+        normalEntry = nNear;
 
         refracted = refractRay(rd, normalEntry, 1.0 / ior);
         if (length(refracted) < 0.5) return vec3(-1000.0);
 
         float tN2, tF2;
-        vec3 n2;
-        if (!hitBox(hitEntry + refracted * 0.01, refracted, center, half_, tN2, tF2, n2)) {
+        vec3 nN2, nF2;
+        if (!hitCylinder(hitEntry + refracted * 0.01, refracted, center, radius, height, tN2, tF2, nN2, nF2)) {
             return vec3(-1000.0);
         }
 
         hitExit = hitEntry + refracted * (tF2 + 0.01);
-        normalExit = boxExitNormal(hitExit, center, half_);
+        normalExit = nF2;
+    } else if (prim.type == PRIM_CONE) {
+        float radius = prim.param0 * scale;
+        float height = prim.param1 * scale;
+        float tNear, tFar;
+        vec3 nNear, nFar;
+        hitCone(ro, rd, center, radius, height, tNear, tFar, nNear, nFar);
+        normalEntry = nNear;
+
+        refracted = refractRay(rd, normalEntry, 1.0 / ior);
+        if (length(refracted) < 0.5) return vec3(-1000.0);
+
+        float tN2, tF2;
+        vec3 nN2, nF2;
+        if (!hitCone(hitEntry + refracted * 0.01, refracted, center, radius, height, tN2, tF2, nN2, nF2)) {
+            return vec3(-1000.0);
+        }
+
+        hitExit = hitEntry + refracted * (tF2 + 0.01);
+        normalExit = nF2;
+    } else if (prim.type == PRIM_TORUS) {
+        float majorR = prim.param0 * scale;
+        float minorR = prim.param1 * scale;
+        float tNear, tFar;
+        vec3 nNear, nFar;
+        hitTorus(ro, rd, center, majorR, minorR, tNear, tFar, nNear, nFar);
+        normalEntry = nNear;
+
+        refracted = refractRay(rd, normalEntry, 1.0 / ior);
+        if (length(refracted) < 0.5) return vec3(-1000.0);
+
+        float tN2, tF2;
+        vec3 nN2, nF2;
+        if (!hitTorus(hitEntry + refracted * 0.01, refracted, center, majorR, minorR, tN2, tF2, nN2, nF2)) {
+            return vec3(-1000.0);
+        }
+
+        hitExit = hitEntry + refracted * (tF2 + 0.01);
+        normalExit = nF2;
+    } else {
+        return vec3(-1000.0);  // Unknown primitive type
     }
 
     // Calculate path length through glass for Beer's law
@@ -325,15 +686,14 @@ void main() {
         return;  // Neighbor missed glass entirely
     }
 
-    // If neighbors hit different primitives, use a distance check instead
-    // to filter out wildly different floor positions
-    if (primRight != primCenter || primUp != primCenter) {
-        // Allow if floor positions are reasonably close (within 2 units)
-        float distRight = length(hitRight - hitCenter);
-        float distUp = length(hitUp - hitCenter);
-        if (distRight > 2.0 || distUp > 2.0) {
-            return;  // Floor positions too far apart - unreliable area calc
-        }
+    // Check floor position continuity - reject if neighbors land too far apart
+    // This catches face transitions within a single primitive (esp. boxes)
+    // where neighboring rays hit different faces and refract very differently
+    float distRight = length(hitRight - hitCenter);
+    float distUp = length(hitUp - hitCenter);
+    float maxDist = raySpacing * 5.0;  // Allow some focusing but reject discontinuities
+    if (distRight > maxDist || distUp > maxDist) {
+        return;  // Floor positions too far apart - likely face transition artifact
     }
 
     // Compute area compression

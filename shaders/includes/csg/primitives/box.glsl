@@ -17,7 +17,7 @@ Interval rayBox(vec3 ro, vec3 rd, vec3 center, vec3 halfExtents) {
 
     if (tEnter > tExit) return EMPTY_INTERVAL;
 
-    // Determine which face we hit
+    // Determine which face we hit based on which slab was entered last
     vec3 nEnter, nExit;
     if (t1.x > t1.y && t1.x > t1.z) {
         nEnter = vec3(-sign(rd.x), 0, 0);

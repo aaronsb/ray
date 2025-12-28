@@ -1,0 +1,20 @@
+; Embedded Torus - Frisvad et al. 2014 Figure 13 test case
+; Glass box with glass torus inside for photon differential caustics testing
+
+; Materials
+(material glass (type glass) (rgb 0.98 0.98 1.0) (ior 1.5))
+
+; Sun from above-side angle to create caustic pattern
+(sun (azimuth 45) (elevation 60) (intensity 1.2) (color 1.0 0.98 0.95) (ambient 0.01))
+
+; Gray floor to see caustics clearly
+(material floor-mat (type diffuse) (rgb 0.7 0.7 0.7))
+(floor (y 0) floor-mat)
+
+; Glass box: 2x2x2 units, centered at height 3.0 (bottom at y=2.0)
+; Raised higher to allow caustics to spread and show pattern
+(shape (box (at 0 3.0 0) (half 1.0 1.0 1.0)) glass)
+
+; Glass torus inside the box
+; Major radius 0.6, minor radius 0.25, rotated to lie flat (horizontal)
+(shape (torus (at 0 3.0 0) (R 0.6) (r 0.25) (rotate 90 0 0)) glass)
