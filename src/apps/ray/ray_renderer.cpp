@@ -1131,8 +1131,9 @@ void RayRenderer::runCausticsPass() {
         return;
     }
 
-    // Count glass primitives for debug
-    int glassCount = 0;
+    // Count refractive primitives (materials with real IOR > 1.0)
+    // This includes glass, water, plastic, jello, etc. - any dielectric
+    int refractiveCount = 0;
     const auto& prims = m_csgScene.primitives();
     const auto& nodes = m_csgScene.nodes();
     const auto& roots = m_csgScene.roots();
@@ -1143,17 +1144,27 @@ void RayRenderer::runCausticsPass() {
             uint32_t matId = node.materialId;
             if (primIdx < prims.size() && matId < m_materials.count()) {
                 const auto& mat = m_materials.materials()[matId];
-                if (mat.type == 2) {  // MAT_GLASS = 2
-                    glassCount++;
-                    printf("  Caustics: glass prim %u at (%.1f, %.1f, %.1f) r=%.1f matId=%u\n",
-                           primIdx, prims[primIdx].x, prims[primIdx].y, prims[primIdx].z,
-                           prims[primIdx].param0, matId);
+                // Check for real IOR > 1.0 (refractive materials)
+                // Metals have IOR but it's complex (imaginary component) - they reflect, not refract
+                // Diffuse materials typically have IOR=1.0 or unused
+                if (mat.ior > 1.001f) {  // Small epsilon to avoid float comparison issues
+                    refractiveCount++;
+                    printf("  Caustics: refractive prim %u (IOR=%.2f) at (%.1f, %.1f, %.1f)\n",
+                           primIdx, mat.ior, prims[primIdx].x, prims[primIdx].y, prims[primIdx].z);
                 }
             }
         }
     }
-    printf("  Caustics: %d glass primitives out of %zu total, floor Y=%.1f\n",
-           glassCount, prims.size(), m_floor.y);
+    printf("  Caustics: %d refractive primitives out of %zu total, floor Y=%.1f\n",
+           refractiveCount, prims.size(), m_floor.y);
+
+    // Skip caustic pass if no refractive materials (IOR > 1.0)
+    // Metals have complex IOR (reflect, don't refract) - only dielectrics cause caustics
+    if (refractiveCount == 0) {
+        printf("  Caustics: no refractive materials (IOR > 1.0), skipping pass\n");
+        m_causticsNeedUpdate = false;
+        return;
+    }
 
     VkDevice dev = m_window->device();
 

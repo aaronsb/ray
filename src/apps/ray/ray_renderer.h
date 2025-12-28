@@ -243,6 +243,12 @@ private:
     VkDeviceMemory m_gaussianBufferMemory = VK_NULL_HANDLE;
 
     // GPU Caustics - area-ratio method with caustic map texture
+    // Current: Traces through refractive CSG primitives (materials with real IOR > 1.0)
+    // Skipped for: metals (complex IOR, reflect only), diffuse (no refraction)
+    // Future optimizations to consider:
+    //   - Camera-distance cascaded caustic maps for quality/perf tradeoff
+    //   - Coarse LOD patches for distant Bezier glass objects
+    //   - Temporal reprojection for stable caustics during motion
     VkPipeline m_causticsPipeline = VK_NULL_HANDLE;
     VkPipelineLayout m_causticsPipelineLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_causticsDescriptorSetLayout = VK_NULL_HANDLE;
