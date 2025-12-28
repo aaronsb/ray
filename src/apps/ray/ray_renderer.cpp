@@ -484,6 +484,10 @@ void RayRenderer::createPatchBuffers() {
     createLightBuffer();
     createEmissiveLightBuffer();
     createGaussianBuffer();
+
+    // Hardware ray tracing acceleration structures
+    loadRayTracingFunctions();
+    buildAccelerationStructures();
 }
 
 void RayRenderer::createDescriptorSet() {
@@ -1368,6 +1372,194 @@ void RayRenderer::runCausticsPass() {
     }
 }
 #endif // FEATURE_GPU_CAUSTICS
+
+// ============================================================================
+// Hardware Ray Tracing (VK_KHR_ray_query)
+// ============================================================================
+
+void RayRenderer::loadRayTracingFunctions() {
+    VkDevice dev = m_window->device();
+    auto inst = m_window->vulkanInstance();
+    auto getDeviceProcAddr = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
+        inst->getInstanceProcAddr("vkGetDeviceProcAddr"));
+
+    m_vkCreateAccelerationStructureKHR = reinterpret_cast<PFN_vkCreateAccelerationStructureKHR>(
+        getDeviceProcAddr(dev, "vkCreateAccelerationStructureKHR"));
+    m_vkDestroyAccelerationStructureKHR = reinterpret_cast<PFN_vkDestroyAccelerationStructureKHR>(
+        getDeviceProcAddr(dev, "vkDestroyAccelerationStructureKHR"));
+    m_vkGetAccelerationStructureBuildSizesKHR = reinterpret_cast<PFN_vkGetAccelerationStructureBuildSizesKHR>(
+        getDeviceProcAddr(dev, "vkGetAccelerationStructureBuildSizesKHR"));
+    m_vkCmdBuildAccelerationStructuresKHR = reinterpret_cast<PFN_vkCmdBuildAccelerationStructuresKHR>(
+        getDeviceProcAddr(dev, "vkCmdBuildAccelerationStructuresKHR"));
+    m_vkGetBufferDeviceAddressKHR = reinterpret_cast<PFN_vkGetBufferDeviceAddressKHR>(
+        getDeviceProcAddr(dev, "vkGetBufferDeviceAddressKHR"));
+    m_vkGetAccelerationStructureDeviceAddressKHR = reinterpret_cast<PFN_vkGetAccelerationStructureDeviceAddressKHR>(
+        getDeviceProcAddr(dev, "vkGetAccelerationStructureDeviceAddressKHR"));
+
+    if (!m_vkCreateAccelerationStructureKHR || !m_vkGetAccelerationStructureBuildSizesKHR) {
+        printf("Warning: Ray tracing functions not available\n");
+        return;
+    }
+    printf("  Ray tracing functions loaded (VK_KHR_ray_query ready)\n");
+}
+
+void RayRenderer::buildAccelerationStructures() {
+    if (!m_vkCreateAccelerationStructureKHR) {
+        printf("  Skipping AS build - ray tracing not available\n");
+        return;
+    }
+
+    const auto& prims = m_csgScene.primitives();
+    if (prims.empty()) {
+        printf("  Skipping AS build - no CSG primitives\n");
+        return;
+    }
+
+    VkDevice dev = m_window->device();
+
+    // Build AABBs for each CSG primitive
+    std::vector<VkAabbPositionsKHR> aabbs;
+    aabbs.reserve(prims.size());
+
+    for (size_t i = 0; i < prims.size(); i++) {
+        // Get AABB from CSG scene
+        parametric::AABB box = m_csgScene.computePrimitiveAABB(static_cast<uint32_t>(i));
+
+        VkAabbPositionsKHR aabb{};
+        aabb.minX = box.min.x;
+        aabb.minY = box.min.y;
+        aabb.minZ = box.min.z;
+        aabb.maxX = box.max.x;
+        aabb.maxY = box.max.y;
+        aabb.maxZ = box.max.z;
+        aabbs.push_back(aabb);
+    }
+
+    // Create AABB buffer
+    VkDeviceSize aabbBufferSize = sizeof(VkAabbPositionsKHR) * aabbs.size();
+    createBuffer(aabbBufferSize,
+        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        m_aabbBuffer, m_aabbBufferMemory);
+
+    // Upload AABBs
+    void* data;
+    m_devFuncs->vkMapMemory(dev, m_aabbBufferMemory, 0, aabbBufferSize, 0, &data);
+    memcpy(data, aabbs.data(), aabbBufferSize);
+    m_devFuncs->vkUnmapMemory(dev, m_aabbBufferMemory);
+
+    // Get AABB buffer device address
+    VkBufferDeviceAddressInfo addrInfo{};
+    addrInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+    addrInfo.buffer = m_aabbBuffer;
+    VkDeviceAddress aabbAddress = m_vkGetBufferDeviceAddressKHR(dev, &addrInfo);
+
+    // BLAS geometry description
+    VkAccelerationStructureGeometryKHR geometry{};
+    geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+    geometry.geometryType = VK_GEOMETRY_TYPE_AABBS_KHR;
+    geometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+    geometry.geometry.aabbs.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR;
+    geometry.geometry.aabbs.data.deviceAddress = aabbAddress;
+    geometry.geometry.aabbs.stride = sizeof(VkAabbPositionsKHR);
+
+    // Get build sizes
+    VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
+    buildInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+    buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    buildInfo.geometryCount = 1;
+    buildInfo.pGeometries = &geometry;
+
+    uint32_t primitiveCount = static_cast<uint32_t>(aabbs.size());
+    VkAccelerationStructureBuildSizesInfoKHR sizeInfo{};
+    sizeInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+    m_vkGetAccelerationStructureBuildSizesKHR(dev, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+        &buildInfo, &primitiveCount, &sizeInfo);
+
+    // Create BLAS buffer
+    createBuffer(sizeInfo.accelerationStructureSize,
+        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
+        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        m_blasBuffer, m_blasBufferMemory);
+
+    // Create BLAS
+    VkAccelerationStructureCreateInfoKHR createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+    createInfo.buffer = m_blasBuffer;
+    createInfo.size = sizeInfo.accelerationStructureSize;
+    createInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    m_vkCreateAccelerationStructureKHR(dev, &createInfo, nullptr, &m_blas);
+
+    // Create scratch buffer for build
+    VkBuffer scratchBuffer;
+    VkDeviceMemory scratchMemory;
+    createBuffer(sizeInfo.buildScratchSize,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        scratchBuffer, scratchMemory);
+
+    VkBufferDeviceAddressInfo scratchAddrInfo{};
+    scratchAddrInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+    scratchAddrInfo.buffer = scratchBuffer;
+    VkDeviceAddress scratchAddress = m_vkGetBufferDeviceAddressKHR(dev, &scratchAddrInfo);
+
+    // Build BLAS
+    buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    buildInfo.dstAccelerationStructure = m_blas;
+    buildInfo.scratchData.deviceAddress = scratchAddress;
+
+    VkAccelerationStructureBuildRangeInfoKHR rangeInfo{};
+    rangeInfo.primitiveCount = primitiveCount;
+    rangeInfo.primitiveOffset = 0;
+    rangeInfo.firstVertex = 0;
+    rangeInfo.transformOffset = 0;
+    const VkAccelerationStructureBuildRangeInfoKHR* pRangeInfo = &rangeInfo;
+
+    // Execute build on command buffer
+    VkCommandBuffer cmdBuf;
+    VkCommandBufferAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocInfo.commandPool = m_window->graphicsCommandPool();
+    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocInfo.commandBufferCount = 1;
+    m_devFuncs->vkAllocateCommandBuffers(dev, &allocInfo, &cmdBuf);
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    m_devFuncs->vkBeginCommandBuffer(cmdBuf, &beginInfo);
+
+    m_vkCmdBuildAccelerationStructuresKHR(cmdBuf, 1, &buildInfo, &pRangeInfo);
+
+    m_devFuncs->vkEndCommandBuffer(cmdBuf);
+
+    // Submit and wait
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &cmdBuf;
+
+    VkFenceCreateInfo fenceInfo{};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    VkFence fence;
+    m_devFuncs->vkCreateFence(dev, &fenceInfo, nullptr, &fence);
+    m_devFuncs->vkQueueSubmit(m_window->graphicsQueue(), 1, &submitInfo, fence);
+    m_devFuncs->vkWaitForFences(dev, 1, &fence, VK_TRUE, UINT64_MAX);
+
+    // Cleanup
+    m_devFuncs->vkDestroyFence(dev, fence, nullptr);
+    m_devFuncs->vkFreeCommandBuffers(dev, m_window->graphicsCommandPool(), 1, &cmdBuf);
+    m_devFuncs->vkDestroyBuffer(dev, scratchBuffer, nullptr);
+    m_devFuncs->vkFreeMemory(dev, scratchMemory, nullptr);
+
+    printf("  Built BLAS: %zu CSG primitives, %.1f KB\n",
+           aabbs.size(), sizeInfo.accelerationStructureSize / 1024.0f);
+
+    // TODO: Build TLAS with single instance referencing BLAS
+}
 
 void RayRenderer::recordComputeCommands(VkCommandBuffer cmdBuf) {
     QSize sz = m_window->swapChainImageSize();

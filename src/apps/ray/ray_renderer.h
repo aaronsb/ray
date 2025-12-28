@@ -253,10 +253,6 @@ private:
     // GPU Caustics - area-ratio method with caustic map texture
     // Current: Traces through refractive CSG primitives (materials with real IOR > 1.0)
     // Skipped for: metals (complex IOR, reflect only), diffuse (no refraction)
-    // Future optimizations to consider:
-    //   - Camera-distance cascaded caustic maps for quality/perf tradeoff
-    //   - Coarse LOD patches for distant Bezier dielectric objects
-    //   - Temporal reprojection for stable caustics during motion
     VkPipeline m_causticsPipeline = VK_NULL_HANDLE;
     VkPipelineLayout m_causticsPipelineLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_causticsDescriptorSetLayout = VK_NULL_HANDLE;
@@ -271,6 +267,27 @@ private:
     static constexpr uint32_t CAUSTIC_HASH_SIZE = CAUSTIC_HASH_CELLS * 4;  // [signature, R, G, B] per cell
     bool m_causticsNeedUpdate = true;
     bool m_causticsRealTime = false;  // Real-time mode: update every frame
+
+    // Hardware ray tracing acceleration structures (VK_KHR_ray_query)
+    // BLAS: Bottom-level AS containing CSG primitive AABBs
+    // TLAS: Top-level AS referencing BLAS instances
+    VkAccelerationStructureKHR m_blas = VK_NULL_HANDLE;
+    VkBuffer m_blasBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_blasBufferMemory = VK_NULL_HANDLE;
+    VkAccelerationStructureKHR m_tlas = VK_NULL_HANDLE;
+    VkBuffer m_tlasBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_tlasBufferMemory = VK_NULL_HANDLE;
+    // AABB buffer for BLAS geometry
+    VkBuffer m_aabbBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_aabbBufferMemory = VK_NULL_HANDLE;
+
+    // Ray tracing extension function pointers
+    PFN_vkCreateAccelerationStructureKHR m_vkCreateAccelerationStructureKHR = nullptr;
+    PFN_vkDestroyAccelerationStructureKHR m_vkDestroyAccelerationStructureKHR = nullptr;
+    PFN_vkGetAccelerationStructureBuildSizesKHR m_vkGetAccelerationStructureBuildSizesKHR = nullptr;
+    PFN_vkCmdBuildAccelerationStructuresKHR m_vkCmdBuildAccelerationStructuresKHR = nullptr;
+    PFN_vkGetBufferDeviceAddressKHR m_vkGetBufferDeviceAddressKHR = nullptr;
+    PFN_vkGetAccelerationStructureDeviceAddressKHR m_vkGetAccelerationStructureDeviceAddressKHR = nullptr;
 
     // Frame tracking
     uint32_t m_frameIndex = 0;
@@ -296,6 +313,10 @@ private:
     void createCausticsPipeline();
     void runCausticsPass();
     void recordComputeCommands(VkCommandBuffer cmdBuf);
+
+    // Hardware ray tracing (VK_KHR_ray_query)
+    void loadRayTracingFunctions();
+    void buildAccelerationStructures();
 
     uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties);
     void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
