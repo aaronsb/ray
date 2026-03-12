@@ -133,6 +133,14 @@ void RayTracingRenderer::releaseResources() {
         m_devFuncs->vkFreeMemory(dev, m_torusBufferMemory, nullptr);
         m_torusBufferMemory = VK_NULL_HANDLE;
     }
+    if (m_triangleBuffer) {
+        m_devFuncs->vkDestroyBuffer(dev, m_triangleBuffer, nullptr);
+        m_triangleBuffer = VK_NULL_HANDLE;
+    }
+    if (m_triangleBufferMemory) {
+        m_devFuncs->vkFreeMemory(dev, m_triangleBufferMemory, nullptr);
+        m_triangleBufferMemory = VK_NULL_HANDLE;
+    }
     if (m_materialBuffer) {
         m_devFuncs->vkDestroyBuffer(dev, m_materialBuffer, nullptr);
         m_materialBuffer = VK_NULL_HANDLE;
@@ -238,6 +246,7 @@ void RayTracingRenderer::createSceneBuffers() {
     const auto& cylinders = m_scene.cylinders();
     const auto& cones = m_scene.cones();
     const auto& tori = m_scene.tori();
+    const auto& triangles = m_scene.triangles();
     const auto& spotLights = m_scene.spotLights();
     const auto& materials = m_scene.materials();
 
@@ -246,6 +255,7 @@ void RayTracingRenderer::createSceneBuffers() {
     VkDeviceSize cylinderSize = sizeof(Cylinder) * std::max(cylinders.size(), size_t(1));
     VkDeviceSize coneSize = sizeof(Cone) * std::max(cones.size(), size_t(1));
     VkDeviceSize torusSize = sizeof(Torus) * std::max(tori.size(), size_t(1));
+    VkDeviceSize triangleSize = sizeof(Triangle) * std::max(triangles.size(), size_t(1));
     VkDeviceSize spotLightSize = sizeof(SpotLight) * std::max(spotLights.size(), size_t(1));
     VkDeviceSize materialSize = sizeof(Material) * materials.size();
     VkDeviceSize cameraSize = sizeof(CameraData);
@@ -269,6 +279,10 @@ void RayTracingRenderer::createSceneBuffers() {
     createBuffer(torusSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                  m_torusBuffer, m_torusBufferMemory);
+
+    createBuffer(triangleSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 m_triangleBuffer, m_triangleBufferMemory);
 
     createBuffer(spotLightSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
@@ -314,6 +328,12 @@ void RayTracingRenderer::createSceneBuffers() {
         m_devFuncs->vkUnmapMemory(dev, m_torusBufferMemory);
     }
 
+    if (!triangles.empty()) {
+        m_devFuncs->vkMapMemory(dev, m_triangleBufferMemory, 0, triangleSize, 0, &data);
+        memcpy(data, triangles.data(), sizeof(Triangle) * triangles.size());
+        m_devFuncs->vkUnmapMemory(dev, m_triangleBufferMemory);
+    }
+
     if (!spotLights.empty()) {
         m_devFuncs->vkMapMemory(dev, m_spotLightBufferMemory, 0, spotLightSize, 0, &data);
         memcpy(data, spotLights.data(), sizeof(SpotLight) * spotLights.size());
@@ -334,7 +354,7 @@ void RayTracingRenderer::createDescriptorSet() {
     // Create descriptor pool
     std::array<VkDescriptorPoolSize, 3> poolSizes{};
     poolSizes[0] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2};
-    poolSizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 7};  // spheres, materials, boxes, spotlights, cylinders, cones, tori
+    poolSizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8};  // spheres, materials, boxes, spotlights, cylinders, cones, tori, triangles
     poolSizes[2] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1};
 
     VkDescriptorPoolCreateInfo poolInfo{};
@@ -407,7 +427,12 @@ void RayTracingRenderer::createDescriptorSet() {
     torusBufferInfo.offset = 0;
     torusBufferInfo.range = VK_WHOLE_SIZE;
 
-    std::array<VkWriteDescriptorSet, 10> writes{};
+    VkDescriptorBufferInfo triangleBufferInfo{};
+    triangleBufferInfo.buffer = m_triangleBuffer;
+    triangleBufferInfo.offset = 0;
+    triangleBufferInfo.range = VK_WHOLE_SIZE;
+
+    std::array<VkWriteDescriptorSet, 11> writes{};
 
     // Binding 0: output image
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -489,6 +514,14 @@ void RayTracingRenderer::createDescriptorSet() {
     writes[9].descriptorCount = 1;
     writes[9].pBufferInfo = &torusBufferInfo;
 
+    // Binding 10: triangles buffer
+    writes[10].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[10].dstSet = m_descriptorSet;
+    writes[10].dstBinding = 10;
+    writes[10].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[10].descriptorCount = 1;
+    writes[10].pBufferInfo = &triangleBufferInfo;
+
     m_devFuncs->vkUpdateDescriptorSets(dev, writes.size(), writes.data(), 0, nullptr);
 }
 
@@ -496,7 +529,7 @@ void RayTracingRenderer::createComputePipeline() {
     VkDevice dev = m_window->device();
 
     // Create descriptor set layout
-    std::array<VkDescriptorSetLayoutBinding, 10> bindings{};
+    std::array<VkDescriptorSetLayoutBinding, 11> bindings{};
 
     // Binding 0: output image
     bindings[0].binding = 0;
@@ -557,6 +590,12 @@ void RayTracingRenderer::createComputePipeline() {
     bindings[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[9].descriptorCount = 1;
     bindings[9].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    // Binding 10: triangles SSBO
+    bindings[10].binding = 10;
+    bindings[10].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[10].descriptorCount = 1;
+    bindings[10].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -650,6 +689,7 @@ void RayTracingRenderer::recordComputeCommands(VkCommandBuffer cmdBuf, bool isSt
     pc.cylinderCount = m_scene.cylinderCount();
     pc.coneCount = m_scene.coneCount();
     pc.torusCount = m_scene.torusCount();
+    pc.triangleCount = m_scene.triangleCount();
     pc.spotLightCount = m_scene.spotLightCount();
     pc.width = sz.width();
     pc.height = sz.height();

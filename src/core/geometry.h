@@ -8,8 +8,8 @@ enum class GeometryType : uint32_t {
     Box = 1,
     Cylinder = 2,
     Cone = 3,
-    Torus = 4
-    // Future: VoxelChunk, TriangleMesh (see ADR-004)
+    Torus = 4,
+    Triangle = 5
 };
 
 // GPU sphere - 32 bytes, 16-byte aligned
@@ -60,4 +60,15 @@ struct alignas(16) Torus {
     float minorRadius;     // radius of the tube
     uint32_t materialId;
     uint32_t _pad;
+};
+
+// GPU triangle - 48 bytes, 16-byte aligned
+// Flat shading - normal computed from vertices in shader
+struct alignas(16) Triangle {
+    Vec3 v0;               // 12 bytes - vertex 0
+    uint32_t materialId;   // 4 bytes
+    Vec3 v1;               // 12 bytes - vertex 1
+    uint32_t _pad0;        // 4 bytes
+    Vec3 v2;               // 12 bytes - vertex 2
+    uint32_t _pad1;        // 4 bytes
 };

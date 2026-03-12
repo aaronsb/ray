@@ -59,6 +59,15 @@ struct Torus {
     uint _pad;
 };
 
+struct Triangle {
+    vec3 v0;
+    uint materialId;
+    vec3 v1;
+    uint _pad0;
+    vec3 v2;
+    uint _pad1;
+};
+
 struct SpotLight {
     vec3 position;
     float _pos_pad;
@@ -115,6 +124,10 @@ layout(std430, set = 0, binding = 9) readonly buffer TorusBuffer {
     Torus tori[];
 };
 
+layout(std430, set = 0, binding = 10) readonly buffer TriangleBuffer {
+    Triangle triangles[];
+};
+
 layout(std140, set = 0, binding = 4) uniform CameraUBO {
     vec3 origin;
     float _pad1;
@@ -143,6 +156,7 @@ layout(push_constant) uniform PushConstants {
     uint cylinderCount;
     uint coneCount;
     uint torusCount;
+    uint triangleCount;
     uint spotLightCount;
     uint width;
     uint height;

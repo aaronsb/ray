@@ -402,6 +402,45 @@ bool hitTorus(Torus torus, Ray r, float tMin, float tMax, inout HitRecord rec) {
     return true;
 }
 
+// Triangle intersection using Möller–Trumbore algorithm
+// Triangle struct must be defined
+bool hitTriangle(Triangle tri, Ray r, float tMin, float tMax, inout HitRecord rec) {
+    vec3 edge1 = tri.v1 - tri.v0;
+    vec3 edge2 = tri.v2 - tri.v0;
+    vec3 h = cross(r.direction, edge2);
+    float a = dot(edge1, h);
+
+    // Ray parallel to triangle - use larger epsilon for robustness
+    if (abs(a) < 0.001) return false;
+
+    float f = 1.0 / a;
+    vec3 s = r.origin - tri.v0;
+    float u = f * dot(s, h);
+
+    // Slightly shrink triangle to avoid edge artifacts
+    const float EDGE_EPS = 0.0001;
+    if (u < EDGE_EPS || u > 1.0 - EDGE_EPS) return false;
+
+    vec3 q = cross(s, edge1);
+    float v = f * dot(r.direction, q);
+
+    if (v < EDGE_EPS || u + v > 1.0 - EDGE_EPS) return false;
+
+    float t = f * dot(edge2, q);
+
+    if (t < tMin || t > tMax) return false;
+
+    rec.t = t;
+    rec.point = rayAt(r, t);
+
+    // Compute face normal from edges (flat shading)
+    vec3 faceNormal = normalize(cross(edge1, edge2));
+    setFaceNormal(rec, r, faceNormal);
+    rec.materialId = tri.materialId;
+
+    return true;
+}
+
 // Ground plane intersection (y = 0, bounded)
 bool hitGroundPlane(Ray r, float tMin, float tMax, inout HitRecord rec, uint materialId) {
     // Plane at y = 0 with normal pointing up
@@ -485,6 +524,15 @@ bool hitScene(Ray r, float tMin, float tMax, inout HitRecord rec) {
     // Check tori
     for (uint i = 0; i < pc.torusCount; i++) {
         if (hitTorus(tori[i], r, tMin, closestSoFar, tempRec)) {
+            hitAnything = true;
+            closestSoFar = tempRec.t;
+            rec = tempRec;
+        }
+    }
+
+    // Check triangles
+    for (uint i = 0; i < pc.triangleCount; i++) {
+        if (hitTriangle(triangles[i], r, tMin, closestSoFar, tempRec)) {
             hitAnything = true;
             closestSoFar = tempRec.t;
             rec = tempRec;

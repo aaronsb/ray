@@ -1,5 +1,28 @@
 #include "test_scene.h"
 
+// Add octahedron (8 triangular faces) at position with given scale
+static void addOctahedron(Scene& scene, Vec3 center, float scale, uint32_t materialId) {
+    // Vertices: top, bottom, and 4 equatorial
+    Vec3 top    = center + Vec3{0, scale, 0};
+    Vec3 bottom = center + Vec3{0, -scale, 0};
+    Vec3 front  = center + Vec3{0, 0, scale};
+    Vec3 back   = center + Vec3{0, 0, -scale};
+    Vec3 left   = center + Vec3{-scale, 0, 0};
+    Vec3 right  = center + Vec3{scale, 0, 0};
+
+    // Upper 4 faces (CCW from outside)
+    scene.addTriangle(top, front, right, materialId);
+    scene.addTriangle(top, right, back, materialId);
+    scene.addTriangle(top, back, left, materialId);
+    scene.addTriangle(top, left, front, materialId);
+
+    // Lower 4 faces (CCW from outside)
+    scene.addTriangle(bottom, right, front, materialId);
+    scene.addTriangle(bottom, back, right, materialId);
+    scene.addTriangle(bottom, left, back, materialId);
+    scene.addTriangle(bottom, front, left, materialId);
+}
+
 Scene createTestScene() {
     Scene scene;
     constexpr float deg2rad = 3.14159265f / 180.0f;
@@ -109,6 +132,12 @@ Scene createTestScene() {
     scene.addTorus({-4.0f, 1.2f, 6.0f}, {1.0f, 0.0f, 0.0f}, 0.8f, 0.25f, 4);
     // Dichroic torus
     scene.addTorus({4.0f, 1.0f, 7.0f}, {0.0f, 0.707f, 0.707f}, 0.7f, 0.2f, 9);
+
+    // === CRYSTALS (triangle meshes) ===
+    // Glass octahedron crystal
+    addOctahedron(scene, {3.0f, 1.0f, 4.0f}, 1.0f, 5);
+    // Dichroic crystal
+    addOctahedron(scene, {-3.0f, 0.8f, 4.0f}, 0.8f, 9);
 
     // ROYGBIV rainbow
     const float roygbivRadius = 0.5f;

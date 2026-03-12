@@ -23,6 +23,7 @@ struct alignas(16) PushConstants {
     uint32_t cylinderCount;
     uint32_t coneCount;
     uint32_t torusCount;
+    uint32_t triangleCount;
     uint32_t spotLightCount;
     uint32_t width;
     uint32_t height;
@@ -53,6 +54,7 @@ public:
     void add(const Cylinder& cyl) { m_cylinders.push_back(cyl); }
     void add(const Cone& cone) { m_cones.push_back(cone); }
     void add(const Torus& torus) { m_tori.push_back(torus); }
+    void add(const Triangle& tri) { m_triangles.push_back(tri); }
 
     // Convenience: add sphere by parameters
     void addSphere(Vec3 center, float radius, uint32_t materialId) {
@@ -82,6 +84,11 @@ public:
         m_tori.push_back({center, axis.normalized(), majorRadius, minorRadius, materialId, 0});
     }
 
+    // Convenience: add triangle by vertices
+    void addTriangle(Vec3 v0, Vec3 v1, Vec3 v2, uint32_t materialId) {
+        m_triangles.push_back({v0, materialId, v1, 0, v2, 0});
+    }
+
     // Lights
     void add(const SpotLight& light) { m_spotLights.push_back(light); }
 
@@ -103,6 +110,7 @@ public:
         m_cylinders.clear();
         m_cones.clear();
         m_tori.clear();
+        m_triangles.clear();
         m_spotLights.clear();
         m_materials.clear();
     }
@@ -113,6 +121,7 @@ public:
     const std::vector<Cylinder>& cylinders() const { return m_cylinders; }
     const std::vector<Cone>& cones() const { return m_cones; }
     const std::vector<Torus>& tori() const { return m_tori; }
+    const std::vector<Triangle>& triangles() const { return m_triangles; }
     const std::vector<SpotLight>& spotLights() const { return m_spotLights; }
     const std::vector<Material>& materials() const { return m_materials; }
 
@@ -125,6 +134,7 @@ public:
     uint32_t cylinderCount() const { return static_cast<uint32_t>(m_cylinders.size()); }
     uint32_t coneCount() const { return static_cast<uint32_t>(m_cones.size()); }
     uint32_t torusCount() const { return static_cast<uint32_t>(m_tori.size()); }
+    uint32_t triangleCount() const { return static_cast<uint32_t>(m_triangles.size()); }
     uint32_t spotLightCount() const { return static_cast<uint32_t>(m_spotLights.size()); }
     uint32_t materialCount() const { return static_cast<uint32_t>(m_materials.size()); }
 
@@ -284,6 +294,7 @@ private:
     std::vector<Cylinder> m_cylinders;
     std::vector<Cone> m_cones;
     std::vector<Torus> m_tori;
+    std::vector<Triangle> m_triangles;
     std::vector<SpotLight> m_spotLights;
     std::vector<Material> m_materials;
 };
